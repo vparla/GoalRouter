@@ -199,7 +199,7 @@ DOCKER_CLI_SOURCE_SHA256: Mapping[Path, str] = {
         "d02a26bf0619a33c3699ec5fcc9f525ea4fda4eccda03dad5b50826c982f79d8"
     ),
     Path("tests/distribution/test_posix_launcher.py"): (
-        "afb543a0522e3f4ebd05fa84289bb364d70ae3aa2ac2a62d27951dc2525a8105"
+        "6407e6ecae9f97633a531b75bd1a463461dbad28b4032582a8356c9954cbdc33"
     ),
     Path("tests/distribution/test_runtime_image.py"): (
         "6af749a13e7e717ddc15ef3d1f1ef64292ae9d1aaa02481db5d1f002401c0bb0"

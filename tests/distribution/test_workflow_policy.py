@@ -41,6 +41,13 @@ JOB_TIMEOUT_MINUTES = 60
 TRUFFLEHOG_ACTION = (
     "trufflesecurity/trufflehog@6f3c981e7b77f235fd2702dd74af25fc4b72bf11"
 )
+SETUP_BUILDX_ACTION = (
+    "docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c"
+)
+BUILDKIT_IMAGE = (
+    "moby/buildkit@sha256:"
+    "2f5adac4ecd194d9f8c10b7b5d7bceb5186853db1b26e5abd3a657af0b7e26ec"
+)
 PUBLISH_JOBS = {
     "release-gates",
     "build-amd64",
@@ -404,11 +411,28 @@ def _assert_publish_policy(workflow: Mapping[str, Any]) -> None:
         assert job["permissions"] == {"contents": "read", "packages": "write"}
         assert job["outputs"] == {"digest": "${{ steps.build.outputs.digest }}"}
         steps = _named_steps(job)
-        assert list(steps) == ["Check out source", "Log in to GHCR", "Build native image"]
+        assert list(steps) == [
+            "Check out source",
+            "Set up Docker Buildx",
+            "Log in to GHCR",
+            "Build native image",
+        ]
         assert steps["Check out source"] == {
             "name": "Check out source",
             "uses": "actions/checkout@v6",
             "with": {"fetch-depth": 0, "persist-credentials": False},
+        }
+        assert steps["Set up Docker Buildx"] == {
+            "name": "Set up Docker Buildx",
+            "uses": SETUP_BUILDX_ACTION,
+            "with": {
+                "cache-binary": False,
+                "cleanup": True,
+                "driver": "docker-container",
+                "driver-opts": f"image={BUILDKIT_IMAGE}",
+                "keep-state": False,
+                "use": True,
+            },
         }
         login = steps["Log in to GHCR"]
         assert login == GHCR_LOGIN_STEP
@@ -639,7 +663,11 @@ def _assert_publish_policy(workflow: Mapping[str, Any]) -> None:
     assert release_run.count('"$assets/') == 8
 
     uses_values = list(_mapping_values_for_key(workflow, "uses"))
-    assert set(uses_values) == {"actions/checkout@v6", "actions/attest@v4"}
+    assert set(uses_values) == {
+        "actions/checkout@v6",
+        "actions/attest@v4",
+        SETUP_BUILDX_ACTION,
+    }
     for uses in uses_values:
         assert isinstance(uses, str)
         if uses not in {"actions/checkout@v6", "actions/attest@v4"}:
@@ -845,16 +873,57 @@ def test_publish_policy_rejects_runner_platform_and_build_attestation_mutations(
         _assert_publish_policy(workflow)
 
     workflow = copy.deepcopy(_load_yaml(PUBLISH_PATH))
-    build = workflow["jobs"]["build-amd64"]["steps"][2]
+    build = workflow["jobs"]["build-amd64"]["steps"][3]
     build["run"] = build["run"].replace("--sbom=true", "--sbom=false")
     with pytest.raises(AssertionError):
         _assert_publish_policy(workflow)
 
     workflow = copy.deepcopy(_load_yaml(PUBLISH_PATH))
-    build = workflow["jobs"]["build-arm64"]["steps"][2]
+    build = workflow["jobs"]["build-arm64"]["steps"][3]
     build["run"] = build["run"].replace("--platform linux/arm64", "--platform linux/amd64")
     with pytest.raises(AssertionError):
         _assert_publish_policy(workflow)
+
+
+def test_publish_policy_requires_immutable_least_privilege_native_builders() -> None:
+    workflow = _load_yaml(PUBLISH_PATH)
+    for job_name in ("build-amd64", "build-arm64"):
+        setup = workflow["jobs"][job_name]["steps"][1]
+        assert setup.get("name") == "Set up Docker Buildx"
+        assert setup.get("uses") == SETUP_BUILDX_ACTION
+        assert setup.get("with") == {
+            "cache-binary": False,
+            "cleanup": True,
+            "driver": "docker-container",
+            "driver-opts": f"image={BUILDKIT_IMAGE}",
+            "keep-state": False,
+            "use": True,
+        }
+
+    for job_name in ("build-amd64", "build-arm64"):
+        workflow = copy.deepcopy(_load_yaml(PUBLISH_PATH))
+        setup = workflow["jobs"][job_name]["steps"][1]
+        setup["uses"] = "docker/setup-buildx-action@v4"
+        with pytest.raises(AssertionError):
+            _assert_publish_policy(workflow)
+
+        workflow = copy.deepcopy(_load_yaml(PUBLISH_PATH))
+        setup = workflow["jobs"][job_name]["steps"][1]
+        setup["with"]["driver"] = "docker"
+        with pytest.raises(AssertionError):
+            _assert_publish_policy(workflow)
+
+        workflow = copy.deepcopy(_load_yaml(PUBLISH_PATH))
+        setup = workflow["jobs"][job_name]["steps"][1]
+        setup["with"]["driver-opts"] = "image=moby/buildkit:buildx-stable-1"
+        with pytest.raises(AssertionError):
+            _assert_publish_policy(workflow)
+
+        workflow = copy.deepcopy(_load_yaml(PUBLISH_PATH))
+        setup = workflow["jobs"][job_name]["steps"][1]
+        setup["with"]["cache-binary"] = True
+        with pytest.raises(AssertionError):
+            _assert_publish_policy(workflow)
 
 
 def test_publish_policy_closes_every_gate_and_native_build_step() -> None:

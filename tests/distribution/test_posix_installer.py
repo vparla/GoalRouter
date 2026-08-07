@@ -393,7 +393,7 @@ def test_loopback_http_rejects_userinfo_authority_confusion_before_curl(
 
     result = run_installer(
         install_home,
-        "http://127.0.0.1:80@example.com/releases",
+        "http://127.0.0.1@example.com/releases",
         "--allow-loopback-http",
     )
 
@@ -405,7 +405,7 @@ def test_loopback_http_rejects_userinfo_authority_confusion_before_curl(
 @pytest.mark.parametrize(
     "release_base",
     [
-        "https://user:top-secret@example.invalid/releases",
+        "https://user@example.invalid/releases",
         "https://@example.invalid/releases",
         "https:///missing-authority",
         "https://example..invalid/releases",

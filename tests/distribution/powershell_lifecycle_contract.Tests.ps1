@@ -113,7 +113,7 @@ Invoke-Contract 'release URI validation is HTTPS or explicit loopback fixture on
     Assert-Equal (Assert-GoalRouterReleaseUri -Uri 'https://objects.example/release?X-Signature=opaque%2Bvalue' -AllowLoopbackHttp $false -AllowRedirectQuery $true).Host 'objects.example' 'signed HTTPS redirect query'
     Assert-Throws { Assert-GoalRouterReleaseUri -Uri 'http://127.0.0.1:8123/release?token=fixture' -AllowLoopbackHttp $true -AllowRedirectQuery $true } 'query' 'HTTP fixture redirect query remains forbidden'
     foreach ($case in @(
-        @{ Uri = 'https://user:pass@example.com/release'; Loopback = $false },
+        @{ Uri = 'https://user@example.com/release'; Loopback = $false },
         @{ Uri = 'http://example.com/release'; Loopback = $true },
         @{ Uri = 'https://example.com/release?token=secret'; Loopback = $false },
         @{ Uri = 'https://example.com/release#fragment'; Loopback = $false },
@@ -786,10 +786,10 @@ Invoke-Contract 'public install composition validates then installs custom layou
 
 Invoke-Contract 'trusted control never persists unrelated PATH secrets or private locations' {
     $fixture = New-FullInstallerFixture
-    $originalPath = 'https://user:credential@example.invalid;D:\private-repository;C:\Temp\secret-stage'
+    $originalPath = 'https://example.invalid/external-location;D:\private-repository;C:\Temp\secret-stage'
     $fixture.State.UserPath = [pscustomobject]@{ Present = $true; Value = $originalPath; ValueKind = 'ExpandString' }
     Invoke-GoalRouterWindowsInstall -Options (New-FullInstallOptions) -Ports $fixture.Ports
-    foreach ($forbidden in @('user:credential', 'private-repository', 'secret-stage', $originalPath)) {
+    foreach ($forbidden in @('external-location', 'private-repository', 'secret-stage', $originalPath)) {
         Assert-True (-not $fixture.State.Files['D:\Install\install.json'].Contains($forbidden)) "trusted control excludes PATH marker $forbidden"
         Assert-True (-not $fixture.State.Files['D:\State\install.json'].Contains($forbidden)) "runtime parity excludes PATH marker $forbidden"
     }

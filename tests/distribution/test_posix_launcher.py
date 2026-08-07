@@ -388,7 +388,7 @@ def test_codex_home_environment_default_is_honored(tmp_path: Path) -> None:
     assert f"src={codex_home},dst=/codex-auth" in mount_for(argv, "/codex-auth")
 
 
-def test_json_is_forwarded_to_the_python_cli(tmp_path: Path) -> None:
+def test_json_flag_reaches_python_cli(tmp_path: Path) -> None:
     fixture = make_launcher_home(tmp_path)
 
     result, argv = run_posix_launcher(fixture, "--json", "version")

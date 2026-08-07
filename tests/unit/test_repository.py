@@ -603,7 +603,7 @@ async def test_git_inspection_does_not_write_index_or_run_index_hook(
 
 
 @pytest.mark.asyncio
-async def test_linked_worktree_remains_inspectable(tmp_path: Path) -> None:
+async def test_linked_worktree_is_inspectable(tmp_path: Path) -> None:
     primary = tmp_path / "primary"
     linked = tmp_path / "linked"
     primary.mkdir()
