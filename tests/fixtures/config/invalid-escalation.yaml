@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: MIT
+# File: tests/fixtures/config/invalid-escalation.yaml
+# Purpose: Structurally valid configuration with an unknown escalation task
+
+schema-version: 1
+default-task: bounded-diagnosis
+planner-task: bounded-diagnosis
+completion-task: bounded-diagnosis
+maximum-read-concurrency: 1
+repository-inspection-timeout-seconds: 120
+model-aliases:
+  economy:
+    model: example-economy
+    reasoning-effort: low
+    rank: 10
+tasks:
+  bounded-diagnosis:
+    description: Diagnose bounded work.
+    model-alias: economy
+    sandbox: read-only
+    approval: automatic
+    timeout-seconds: 60
+    max-attempts: 1
+    escalate-to: absent-task
+matching: []
+hard-risk-rules: []

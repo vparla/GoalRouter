@@ -1,0 +1,18 @@
+{
+  "options": [
+    "--project",
+    "--access",
+    "--config",
+    "--state-dir",
+    "--codex-home",
+    "--image",
+    "--auth-mode",
+    "--json"
+  ],
+  "maintenance_commands": [
+    "doctor",
+    "update",
+    "version",
+    "uninstall"
+  ]
+}

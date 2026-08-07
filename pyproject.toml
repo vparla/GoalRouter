@@ -1,0 +1,64 @@
+# SPDX-License-Identifier: MIT
+# File: pyproject.toml
+# Purpose: Build, dependency, and verification configuration for GoalRouter
+
+[build-system]
+requires = ["setuptools>=80,<81"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "goalrouter"
+version = "1.0.0"
+description = "Task-driven model routing controller for local Codex engineering workflows"
+readme = "README.md"
+requires-python = ">=3.14,<3.15"
+license = "MIT"
+authors = [{ name = "GoalRouter contributors" }]
+dependencies = [
+    "jsonschema>=4.23,<5",
+    "openai-codex==0.144.4",
+    "PyYAML>=6.0.2,<7",
+]
+
+[project.optional-dependencies]
+dev = [
+    "mypy>=1.15,<2",
+    "pytest>=8,<10",
+    "pytest-asyncio>=1,<2",
+    "ruff>=0.15.8,<0.16",
+    "setuptools>=80,<81",
+    "types-jsonschema>=4.23,<5",
+    "types-PyYAML>=6.0.12,<7",
+]
+
+[project.scripts]
+goalrouter = "goalrouter.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "-q --strict-markers -p no:cacheprovider"
+asyncio_default_fixture_loop_scope = "function"
+asyncio_mode = "auto"
+filterwarnings = ["error"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+required-version = ">=0.15.8"
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["ASYNC", "B", "C4", "E", "F", "I", "PERF", "PIE", "PYI", "RUF", "SIM", "UP"]
+
+[tool.ruff.lint.isort]
+combine-as-imports = true
+
+[tool.mypy]
+python_version = "3.14"
+strict = true
+warn_unreachable = true

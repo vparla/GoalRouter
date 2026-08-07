@@ -1,0 +1,24 @@
+#!/bin/sh
+set -eu
+
+: "${FAKE_DOCKER_ARGV:?}"
+has_state_mount=0
+for argument do
+    case $argument in
+        *,dst=/state | *,dst=/state,*) has_state_mount=1 ;;
+    esac
+done
+if [ "$has_state_mount" -eq 0 ]; then
+    printf '{"version":"1.0.0","protocol_version":%s}\n' "${FAKE_DOCKER_PROTOCOL:-1}"
+    exit 0
+fi
+
+: >"$FAKE_DOCKER_ARGV"
+for argument do
+    printf '%s\000' "$argument" >>"$FAKE_DOCKER_ARGV"
+done
+
+if [ "${FAKE_DOCKER_STDOUT+x}" = x ]; then
+    printf '%s' "$FAKE_DOCKER_STDOUT"
+fi
+exit "${FAKE_DOCKER_STATUS:-0}"

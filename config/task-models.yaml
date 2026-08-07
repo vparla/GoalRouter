@@ -1,0 +1,178 @@
+# SPDX-License-Identifier: MIT
+# File: config/task-models.yaml
+# Purpose: Default repository-neutral GoalRouter routing policy
+
+schema-version: 1
+default-task: bounded-diagnosis
+planner-task: objective-planning
+completion-task: completion-review
+maximum-read-concurrency: 4
+repository-inspection-timeout-seconds: 120
+
+model-aliases:
+  economy:
+    model: gpt-5.6-luna
+    reasoning-effort: low
+    rank: 10
+  balanced:
+    model: gpt-5.6-terra
+    reasoning-effort: medium
+    rank: 20
+  frontier:
+    model: gpt-5.6-sol
+    reasoning-effort: high
+    rank: 30
+  assurance:
+    model: gpt-5.6-sol
+    reasoning-effort: xhigh
+    rank: 40
+
+tasks:
+  objective-planning:
+    description: Decompose a compound engineering objective into bounded work items.
+    model-alias: balanced
+    sandbox: read-only
+    approval: automatic
+    timeout-seconds: 1800
+    max-attempts: 1
+  completion-review:
+    description: Independently verify objective scope and required evidence.
+    model-alias: assurance
+    sandbox: read-only
+    approval: automatic
+    timeout-seconds: 3600
+    max-attempts: 1
+  repository-search:
+    description: Locate files, symbols, tests, or exact text.
+    model-alias: economy
+    sandbox: read-only
+    approval: automatic
+    timeout-seconds: 600
+    max-attempts: 1
+  docker-invoke:
+    description: Run an existing explicitly supplied Docker command.
+    model-alias: economy
+    sandbox: workspace-write
+    approval: automatic
+    timeout-seconds: 7200
+    max-attempts: 1
+  docker-cleanup:
+    description: Perform an explicitly scoped Docker cleanup operation.
+    model-alias: economy
+    sandbox: workspace-write
+    approval: required
+    destructive: true
+    timeout-seconds: 900
+    max-attempts: 1
+  unit-test-run:
+    description: Run an existing focused or broad unit-test command.
+    model-alias: economy
+    sandbox: workspace-write
+    approval: automatic
+    timeout-seconds: 3600
+    max-attempts: 1
+  unit-test-debug:
+    description: Diagnose a bounded unit-test failure.
+    model-alias: balanced
+    sandbox: read-only
+    approval: automatic
+    timeout-seconds: 1800
+    max-attempts: 1
+    escalate-to: core-debugging
+  bounded-diagnosis:
+    description: Diagnose an unfamiliar but bounded engineering failure.
+    model-alias: balanced
+    sandbox: read-only
+    approval: automatic
+    timeout-seconds: 1800
+    max-attempts: 1
+    escalate-to: core-debugging
+  documentation:
+    description: Create or update durable technical documentation.
+    model-alias: balanced
+    sandbox: workspace-write
+    approval: automatic
+    timeout-seconds: 1800
+    max-attempts: 1
+  configuration-edit:
+    description: Modify an established configuration format.
+    model-alias: balanced
+    sandbox: workspace-write
+    approval: automatic
+    timeout-seconds: 1800
+    max-attempts: 1
+  python-coding:
+    description: Implement or change Python production code.
+    model-alias: frontier
+    sandbox: workspace-write
+    approval: required
+    timeout-seconds: 3600
+    max-attempts: 1
+  c-cpp-coding:
+    description: Implement or change C or C++ production code.
+    model-alias: frontier
+    sandbox: workspace-write
+    approval: required
+    timeout-seconds: 3600
+    max-attempts: 1
+  rust-coding:
+    description: Implement or change Rust production code.
+    model-alias: frontier
+    sandbox: workspace-write
+    approval: required
+    timeout-seconds: 3600
+    max-attempts: 1
+  core-debugging:
+    description: Resolve a repeated, cross-component, or core implementation failure.
+    model-alias: frontier
+    sandbox: workspace-write
+    approval: required
+    timeout-seconds: 3600
+    max-attempts: 1
+  architecture-change:
+    description: Change a shared abstraction, public interface, or invariant.
+    model-alias: frontier
+    sandbox: workspace-write
+    approval: required
+    timeout-seconds: 3600
+    max-attempts: 1
+  security-sensitive:
+    description: Work involving authentication, secrets, sandboxing, or supply chain.
+    model-alias: assurance
+    sandbox: workspace-write
+    approval: required
+    timeout-seconds: 3600
+    max-attempts: 1
+  release-publish:
+    description: Perform an externally visible release or publication operation.
+    model-alias: assurance
+    sandbox: workspace-write
+    approval: required
+    external-write: true
+    timeout-seconds: 14400
+    max-attempts: 1
+
+matching:
+  - task: docker-invoke
+    phrases: [run docker, build image, start container]
+  - task: docker-cleanup
+    phrases: [docker cleanup, prune images, remove stopped containers]
+  - task: c-cpp-coding
+    file-globs: ["**/*.c", "**/*.cc", "**/*.cpp", "**/*.h", "**/*.hpp"]
+  - task: python-coding
+    file-globs: ["**/*.py"]
+  - task: rust-coding
+    file-globs: ["**/*.rs"]
+
+hard-risk-rules:
+  - flag: security
+    minimum-model-alias: frontier
+    approval: required
+  - flag: public-contract
+    minimum-model-alias: frontier
+  - flag: concurrency
+    minimum-model-alias: frontier
+  - flag: destructive
+    approval: required
+  - flag: external-write
+    approval: required

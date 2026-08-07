@@ -1,0 +1,18 @@
+{
+  "work-items": [
+    {
+      "id": "escape",
+      "title": "Escape",
+      "instructions": "Touch a path outside the project.",
+      "task": "python-coding",
+      "phase": "implementation",
+      "dependencies": [],
+      "access": "workspace-write",
+      "affected-paths": ["../outside.py"],
+      "expected-result": "Outside path changed.",
+      "verification": ["Check the file."],
+      "confidence": 0.9,
+      "risk-flags": []
+    }
+  ]
+}

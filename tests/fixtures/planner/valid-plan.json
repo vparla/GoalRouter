@@ -1,0 +1,32 @@
+{
+  "work-items": [
+    {
+      "id": "inspect",
+      "title": "Inspect the implementation",
+      "instructions": "Find the relevant code and tests.",
+      "task": "repository-search",
+      "phase": "discovery",
+      "dependencies": [],
+      "access": "read-only",
+      "affected-paths": ["src"],
+      "expected-result": "Relevant code and tests are identified.",
+      "verification": [],
+      "confidence": 0.9,
+      "risk-flags": []
+    },
+    {
+      "id": "implement",
+      "title": "Implement the change",
+      "instructions": "Implement and test the requested behavior.",
+      "task": "python-coding",
+      "phase": "implementation",
+      "dependencies": ["inspect"],
+      "access": "workspace-write",
+      "affected-paths": ["src/example.py", "tests/test_example.py"],
+      "expected-result": "The requested behavior is implemented.",
+      "verification": ["Run the focused test."],
+      "confidence": 0.85,
+      "risk-flags": ["public-contract"]
+    }
+  ]
+}

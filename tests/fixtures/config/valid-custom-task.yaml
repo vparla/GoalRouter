@@ -1,0 +1,62 @@
+# SPDX-License-Identifier: MIT
+# File: tests/fixtures/config/valid-custom-task.yaml
+# Purpose: Valid repository-neutral configuration with a user-defined task
+
+schema-version: 1
+default-task: bounded-diagnosis
+planner-task: objective-planning
+completion-task: completion-review
+maximum-read-concurrency: 2
+repository-inspection-timeout-seconds: 120
+
+model-aliases:
+  economy:
+    model: example-economy
+    reasoning-effort: low
+    rank: 10
+  frontier:
+    model: example-frontier
+    reasoning-effort: high
+    rank: 20
+
+tasks:
+  objective-planning:
+    description: Plan an objective.
+    model-alias: economy
+    sandbox: read-only
+    approval: automatic
+    timeout-seconds: 60
+    max-attempts: 1
+  completion-review:
+    description: Review completion.
+    model-alias: frontier
+    sandbox: read-only
+    approval: automatic
+    timeout-seconds: 60
+    max-attempts: 1
+  bounded-diagnosis:
+    description: Diagnose bounded work.
+    model-alias: economy
+    sandbox: read-only
+    approval: automatic
+    timeout-seconds: 60
+    max-attempts: 1
+  database-migration:
+    description: Change a database schema.
+    model-alias: frontier
+    sandbox: workspace-write
+    approval: required
+    timeout-seconds: 120
+    max-attempts: 1
+    destructive: true
+    escalate-to: completion-review
+
+matching:
+  - task: database-migration
+    phrases: [migrate database]
+    file-globs: ["**/migrations/*.sql"]
+
+hard-risk-rules:
+  - flag: security
+    minimum-model-alias: frontier
+    approval: required

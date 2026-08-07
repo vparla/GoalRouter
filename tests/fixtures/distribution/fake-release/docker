@@ -1,0 +1,88 @@
+#!/bin/sh
+set -eu
+
+if [ -n "${FAKE_DOCKER_LOG:-}" ]; then
+    printf '%s\n' "$*" >>"$FAKE_DOCKER_LOG"
+fi
+
+case ${1:-} in
+    version)
+        [ "${FAKE_DOCKER_DAEMON_FAILURE:-0}" -eq 0 ] || exit 31
+        if [ "${2:-}" = --format ]; then
+            printf '%s %s\n' \
+                "${FAKE_DOCKER_CLIENT_VERSION:-25.0.0}" \
+                "${FAKE_DOCKER_SERVER_VERSION:-25.0.0}"
+        fi
+        exit 0
+        ;;
+    info)
+        [ "${FAKE_DOCKER_DAEMON_FAILURE:-0}" -eq 0 ] || exit 31
+        exit 0
+        ;;
+    pull)
+        case ${2:-} in
+            *"${FAKE_DOCKER_PULL_FAILURE_MATCH:-__never__}"*)
+                [ -z "${FAKE_DOCKER_PULL_FAILURE_MATCH:-}" ] || exit 32
+                ;;
+        esac
+        exit 0
+        ;;
+    image)
+        [ "${2:-}" = inspect ] || exit 33
+        shift 2
+        if [ "${1:-}" = --format ]; then
+            format=${2:-}
+            image=${3:-}
+            case $format in
+                *Architecture*) printf '%s\n' "${FAKE_DOCKER_ARCH:-amd64}" ;;
+                *RepoDigests*)
+                    if [ -n "${FAKE_DOCKER_REPODIGESTS:-}" ]; then
+                        printf '%s\n' "$FAKE_DOCKER_REPODIGESTS"
+                    else
+                        last=${image##*/}
+                        case $last in
+                            *:*) repository=${image%:*} ;;
+                            *) repository=$image ;;
+                        esac
+                        printf '%s@%s\n' "$repository" "${FAKE_DOCKER_DIGEST:-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}"
+                    fi
+                    ;;
+                *revision*) printf '%s\n' "${FAKE_DOCKER_REVISION:-fixture-revision}" ;;
+                *) exit 34 ;;
+            esac
+        fi
+        exit 0
+        ;;
+    run)
+        case " $* " in
+            *' config template '*)
+                [ "${FAKE_DOCKER_TEMPLATE_FAILURE:-0}" -eq 0 ] || exit 37
+                printf '%s\n' 'schema-version: 1' 'model-aliases: {}' 'tasks: {}'
+                ;;
+            *' config validate '*)
+                [ "${FAKE_DOCKER_TEMPLATE_VALIDATION_FAILURE:-0}" -eq 0 ] || exit 38
+                case " $* " in
+                    *2.0.0*) [ "${FAKE_DOCKER_REJECT_V2_CONFIG:-0}" -eq 0 ] || exit 35 ;;
+                esac
+                printf '%s\n' '{"status":"valid"}'
+                ;;
+            *' --json version '*)
+                case " $* " in
+                    *2.0.0*) app_version=2.0.0 ;;
+                    *) app_version=${FAKE_DOCKER_APP_VERSION:-1.0.0} ;;
+                esac
+                printf '{"image_reference":null,"image_revision":"%s","protocol_version":%s,"version":"%s"}\n' \
+                    "${FAKE_DOCKER_REVISION:-fixture-revision}" \
+                    "${FAKE_DOCKER_PROTOCOL:-1}" \
+                    "$app_version"
+                ;;
+            *' models '*)
+                [ "${FAKE_DOCKER_MODELS_FAILURE:-0}" -eq 0 ] || exit 39
+                printf '%s\n' 'fixture-model'
+                ;;
+        esac
+        exit 0
+        ;;
+esac
+
+exit 36

@@ -1,0 +1,1 @@
+{"version":"1.0.0","protocol_version":1,"image":"registry.example/goalrouter:1.0.0","image_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","architectures":["linux/amd64","linux/arm64"],"source_revision":"fixture-revision","minimum_hosts":{"windows":"10.0.19045","powershell":"5.1","wsl":"2.2.3","docker":"20.10"}}

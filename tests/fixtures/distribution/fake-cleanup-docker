@@ -1,0 +1,67 @@
+#!/bin/sh
+set -eu
+
+: "${FAKE_DOCKER_ROOT:?}"
+kind=$1
+action=$2
+shift 2
+printf '%s %s\n' "$kind" "$action" >>"$FAKE_DOCKER_ROOT/events"
+
+resource_dir() {
+    printf '%s/%s/%s' "$FAKE_DOCKER_ROOT" "$1" "$2"
+}
+
+case "$kind:$action" in
+    container:ls | volume:ls)
+        if [ -d "$FAKE_DOCKER_ROOT/$kind" ]; then
+            for path in "$FAKE_DOCKER_ROOT/$kind"/*; do
+                [ -d "$path" ] || continue
+                printf '%s\n' "${path##*/}"
+            done
+        fi
+        ;;
+    image:ls)
+        no_trunc=0
+        for argument do
+            [ "$argument" = --no-trunc ] && no_trunc=1
+        done
+        if [ -d "$FAKE_DOCKER_ROOT/image/owned" ]; then
+            if [ "$no_trunc" -eq 1 ]; then
+                cat "$FAKE_DOCKER_ROOT/image/owned/id"
+            else
+                cut -c 1-12 "$FAKE_DOCKER_ROOT/image/owned/id"
+            fi
+        fi
+        ;;
+    container:inspect | volume:inspect | image:inspect)
+        format=$2
+        resource=$3
+        if [ "$kind" = image ]; then
+            path=$FAKE_DOCKER_ROOT/image/owned
+        else
+            path=$(resource_dir "$kind" "$resource")
+        fi
+        [ -d "$path" ] || exit 1
+        case $format in
+            *org.goalrouter.test.run*) cat "$path/run" ;;
+            *org.goalrouter.test*) cat "$path/owner" ;;
+            *Id*) cat "$path/id" ;;
+            *) exit 2 ;;
+        esac
+        ;;
+    container:rm | volume:rm | image:rm)
+        resource=
+        for argument do
+            resource=$argument
+        done
+        if [ "${FAKE_DOCKER_FAIL_REMOVE:-}" = "$kind:$resource" ]; then
+            exit 1
+        fi
+        if [ "$kind" = image ]; then
+            rm -rf "$FAKE_DOCKER_ROOT/image/owned"
+        else
+            rm -rf "$(resource_dir "$kind" "$resource")"
+        fi
+        ;;
+    *) exit 2 ;;
+esac

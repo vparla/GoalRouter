@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: MIT
+# File: .dockerignore
+# Purpose: Exclude local-only and generated files from Docker build contexts
+
+.git
+planning/
+.goalrouter/
+.superpowers/
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/

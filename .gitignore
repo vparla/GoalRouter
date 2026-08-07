@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: MIT
+# File: .gitignore
+# Purpose: Local-only and generated GoalRouter files
+
+planning/
+.goalrouter/
+.superpowers/
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/

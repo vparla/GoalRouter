@@ -1,0 +1,32 @@
+{
+  "work-items": [
+    {
+      "id": "a",
+      "title": "A",
+      "instructions": "A",
+      "task": "repository-search",
+      "phase": "discovery",
+      "dependencies": ["b"],
+      "access": "read-only",
+      "affected-paths": [],
+      "expected-result": "A",
+      "verification": [],
+      "confidence": 0.9,
+      "risk-flags": []
+    },
+    {
+      "id": "b",
+      "title": "B",
+      "instructions": "B",
+      "task": "repository-search",
+      "phase": "discovery",
+      "dependencies": ["a"],
+      "access": "read-only",
+      "affected-paths": [],
+      "expected-result": "B",
+      "verification": [],
+      "confidence": 0.9,
+      "risk-flags": []
+    }
+  ]
+}

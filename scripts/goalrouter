@@ -1,0 +1,780 @@
+#!/bin/sh
+set -eu
+umask 077
+
+LC_ALL=C
+export LC_ALL
+newline='
+'
+
+fail() {
+    failure_message=$*
+    if [ "${forward_json:-0}" -eq 1 ]; then
+        case $failure_message in
+            'Launcher protocol 1 cannot run image protocol '*) failure_code=launcher_protocol_mismatch ;;
+            *authentication* | *Codex* | *codex* | *OPENAI_API_KEY*) failure_code=authentication ;;
+            *configuration* | *config*) failure_code=configuration ;;
+            *registry* | *image* | *digest*) failure_code=registry ;;
+            *writable* | *permission* | *owner*) failure_code=permission ;;
+            *project* | *mount* | *path* | *directory* | *file*) failure_code=mount ;;
+            *Docker* | *HOME* | *required*) failure_code=prerequisite ;;
+            *) failure_code=application ;;
+        esac
+        if [ "$failure_code" = launcher_protocol_mismatch ]; then
+            printf '{\n  "status": "error",\n  "code": "launcher_protocol_mismatch",\n  "message": "%s"\n}\n' \
+                "$failure_message"
+        else
+            printf '{"status":"error","code":"%s","message":"GoalRouter launcher failed in the %s category."}\n' \
+                "$failure_code" "$failure_code"
+        fi
+    else
+        printf 'goalrouter launcher: %s\n' "$failure_message" >&2
+    fi
+    exit 1
+}
+
+fail_native() {
+    native_failure=$*
+    case $native_failure in
+        *authentication* | *Codex* | *codex* | *OPENAI_API_KEY*)
+            fail 'authentication failure from native runtime'
+            ;;
+        *registry* | *manifest* | *image* | *digest* | *'pull access denied'*)
+            fail 'registry failure from native runtime'
+            ;;
+        *mount* | *'bind source'* | *'source path'*)
+            fail 'mount failure from native runtime'
+            ;;
+        *writable* | *permission* | *denied* | *read-only* | *readonly* | *owner* | *ACL*)
+            fail 'permission failure from native runtime'
+            ;;
+        *configuration* | *config* | *schema* | *YAML* | *yaml*)
+            fail 'configuration failure from native runtime'
+            ;;
+        *Docker* | *'docker daemon'* | *WSL* | *HOME* | *required* | *'not found'*)
+            fail 'Docker prerequisite failure from native runtime'
+            ;;
+        *) fail 'application failure from native runtime' ;;
+    esac
+}
+
+launcher_help() {
+    cat <<'EOF'
+Usage: goalrouter [launcher-options] <command> [command-options]
+
+Launcher options:
+  --project <host-path>
+  --access readonly|write|docker
+  --config <host-path>
+  --state-dir <host-path>
+  --codex-home <host-path>
+  --image <tag-or-digest>
+  --auth-mode existing-session|api-key
+  --json
+
+Maintenance commands:
+  doctor
+  update
+  version
+  uninstall
+EOF
+}
+
+leading_help_requested() {
+    while [ "$#" -gt 0 ]; do
+        case $1 in
+            --help) return 0 ;;
+            --project | --access | --config | --state-dir | --codex-home | --image | --auth-mode)
+                [ "$#" -ge 2 ] || return 1
+                shift 2
+                ;;
+            --json) shift ;;
+            --* | *) return 1 ;;
+        esac
+    done
+    return 1
+}
+
+if leading_help_requested "$@"; then
+    launcher_help
+    exit 0
+fi
+
+resolve_directory() {
+    rd_candidate=$1
+    rd_label=$2
+    [ -d "$rd_candidate" ] || fail "$rd_label directory does not exist: $rd_candidate"
+    case $rd_candidate in
+        /*) ;;
+        *)
+            rd_base_with_marker=$(pwd -P; printf .)
+            rd_base=${rd_base_with_marker%"$newline."}
+            rd_candidate=$rd_base/$rd_candidate
+            ;;
+    esac
+    rd_resolved_with_marker=$(
+        CDPATH='' cd -P "$rd_candidate" || exit 1
+        pwd -P || exit 1
+        printf .
+    ) || fail "cannot resolve $rd_label directory: $rd_candidate"
+    case $rd_resolved_with_marker in
+        *"$newline.") ;;
+        *) fail "cannot parse physical $rd_label directory: $rd_candidate" ;;
+    esac
+    resolved_path=${rd_resolved_with_marker%"$newline."}
+}
+
+resolve_file() {
+    rf_candidate=$1
+    rf_label=$2
+    [ -f "$rf_candidate" ] || fail "$rf_label file does not exist: $rf_candidate"
+    case $rf_candidate in
+        */*)
+            rf_parent=${rf_candidate%/*}
+            rf_name=${rf_candidate##*/}
+            [ -n "$rf_parent" ] || rf_parent=/
+            ;;
+        *)
+            rf_parent=.
+            rf_name=$rf_candidate
+            ;;
+    esac
+    resolve_directory "$rf_parent" "$rf_label parent"
+    rf_parent=$resolved_path
+    if [ "$rf_parent" = / ]; then
+        resolved_path=/$rf_name
+    else
+        resolved_path=$rf_parent/$rf_name
+    fi
+}
+
+read_metadata() {
+    metadata_file=$1
+    metadata_name=$2
+    [ -f "$metadata_file" ] || fail "missing $metadata_name: $metadata_file"
+    metadata_hex=$(od -An -v -t x1 "$metadata_file") \
+        || fail "cannot inspect $metadata_name: $metadata_file"
+    # Word splitting is intentional: od emits one whitespace-separated token per byte.
+    # shellcheck disable=SC2086
+    set -- $metadata_hex
+    [ "$#" -gt 0 ] || fail "invalid $metadata_name metadata bytes"
+    for metadata_byte do
+        case $metadata_byte in
+            20 | 2[1-9a-f] | [3-6][0-9a-f] | 7[0-9a-e]) ;;
+            *) fail "invalid $metadata_name metadata bytes" ;;
+        esac
+    done
+    metadata_value=$(cat "$metadata_file") \
+        || fail "cannot read $metadata_name: $metadata_file"
+}
+
+discover_launcher_context() {
+    installed_mode=0
+    ric_self=$0
+    case $ric_self in
+        /*) ;;
+        */*) ric_self=$(pwd -P)/$ric_self ;;
+        *) ric_self=$(command -v "$ric_self") || fail 'cannot resolve installed launcher path' ;;
+    esac
+    [ -f "$ric_self" ] && [ -x "$ric_self" ] && [ ! -L "$ric_self" ] \
+        || fail 'launcher path is missing or unsafe'
+    ric_name=${ric_self##*/}
+    ric_parent=${ric_self%/*}
+    installed_bin=$(CDPATH='' cd -P "$ric_parent" && pwd -P) \
+        || fail 'cannot resolve launcher directory'
+    ric_self=$installed_bin/$ric_name
+    installed_control=$installed_bin/.goalrouter-control
+    if [ -e "$installed_control" ] || [ -L "$installed_control" ]; then
+        [ "$ric_name" = goalrouter ] \
+            || fail 'trusted installation control is adjacent to a noncanonical launcher'
+        [ -d "$installed_control" ] && [ ! -L "$installed_control" ] \
+            || fail 'missing or unsafe trusted installation control'
+        installed_mode=1
+    fi
+}
+
+validate_trusted_control() {
+    [ "$installed_mode" -eq 1 ] || fail 'trusted installation control is unavailable'
+    command -v awk >/dev/null 2>&1 || fail 'required metadata parser is unavailable: awk'
+    if command -v sha256sum >/dev/null 2>&1; then
+        vim_hash_tool=sha256sum
+    elif command -v shasum >/dev/null 2>&1; then
+        vim_hash_tool=shasum
+    else
+        fail 'required metadata verifier is unavailable: sha256sum or shasum'
+    fi
+    vim_expected_names='install.json
+image-ref
+image-digest
+launcher-version
+protocol-version
+app-version
+image-platform
+source-revision
+release-base
+release-transport
+image-repository
+owned-home
+owned-bin-dir
+owned-config-dir
+owned-state-dir
+owned-codex-home
+owned-launcher
+owned-installer
+owned-uninstaller
+guard-config-root
+guard-state-root
+guard-config-parent
+guard-state-parent
+guard-bin-parent'
+    [ -f "$installed_control/ownership.sha256" ] \
+        && [ ! -L "$installed_control/ownership.sha256" ] \
+        || fail 'missing or unsafe trusted control manifest'
+    vim_control_names=$(awk '{ if (NF != 2 || $1 !~ /^[0-9a-f]{64}$/) exit 2; print $2 }' \
+        "$installed_control/ownership.sha256") || fail 'corrupt trusted control manifest'
+    [ "$vim_control_names" = "$vim_expected_names" ] \
+        || fail 'trusted control manifest has missing, duplicate, or unexpected entries'
+    if [ "$vim_hash_tool" = sha256sum ]; then
+        (CDPATH='' cd "$installed_control" && sha256sum -c ownership.sha256) >/dev/null 2>&1 \
+            || fail 'trusted control checksum mismatch'
+    else
+        (CDPATH='' cd "$installed_control" && shasum -a 256 -c ownership.sha256) >/dev/null 2>&1 \
+            || fail 'trusted control checksum mismatch'
+    fi
+    read_metadata "$installed_control/launcher-version" launcher-version
+    installed_launcher_version=$metadata_value
+    valid_single_line "$installed_launcher_version" || fail 'invalid launcher version metadata'
+    read_metadata "$installed_control/protocol-version" protocol-version
+    installed_protocol=$metadata_value
+    [ "$installed_protocol" = 1 ] || fail 'installed launcher protocol major is not 1'
+    read_metadata "$installed_control/app-version" app-version
+    installed_app_version=$metadata_value
+    [ "$installed_app_version" = "$installed_launcher_version" ] \
+        || fail 'installed application and launcher versions do not match'
+    read_metadata "$installed_control/image-ref" image-ref
+    installed_image_ref=$metadata_value
+    valid_image_reference "$installed_image_ref" || fail 'invalid installed image reference metadata'
+    read_metadata "$installed_control/image-digest" image-digest
+    installed_image_digest=$metadata_value
+    valid_image_digest "$installed_image_digest" || fail 'invalid installed image digest metadata'
+    installed_image=$installed_image_ref@$installed_image_digest
+    read_metadata "$installed_control/image-platform" image-platform
+    installed_platform=$metadata_value
+    case $installed_platform in
+        linux/amd64 | linux/arm64) ;;
+        *) fail 'invalid installed image platform metadata' ;;
+    esac
+    read_metadata "$installed_control/source-revision" source-revision
+    installed_revision=$metadata_value
+    valid_single_line "$installed_revision" || fail 'invalid installed source revision metadata'
+    read_metadata "$installed_control/owned-config-dir" owned-config-dir
+    trusted_config_dir=$metadata_value
+    read_metadata "$installed_control/owned-state-dir" owned-state-dir
+    trusted_state_dir=$metadata_value
+    read_metadata "$installed_control/owned-codex-home" owned-codex-home
+    trusted_codex_home=$metadata_value
+}
+
+validate_installed_metadata() {
+    vim_state=$1
+    [ -f "$vim_state/install.json" ] || fail 'trusted installation is missing install metadata'
+    [ -f "$vim_state/ownership.sha256" ] && [ ! -L "$vim_state/ownership.sha256" ] \
+        || fail 'trusted installation ownership manifest is missing or unsafe'
+    vim_manifest_names=$(awk '{ if (NF != 2 || $1 !~ /^[0-9a-f]{64}$/) exit 2; print $2 }' \
+        "$vim_state/ownership.sha256") || fail 'corrupt ownership manifest'
+    [ "$vim_manifest_names" = "$vim_expected_names" ] \
+        || fail 'ownership manifest has missing, duplicate, or unexpected entries'
+    if [ "$vim_hash_tool" = sha256sum ]; then
+        (CDPATH='' cd "$vim_state" && sha256sum -c ownership.sha256) >/dev/null 2>&1 \
+            || fail 'ownership metadata checksum mismatch'
+    else
+        (CDPATH='' cd "$vim_state" && shasum -a 256 -c ownership.sha256) >/dev/null 2>&1 \
+            || fail 'ownership metadata checksum mismatch'
+    fi
+    [ "$(cat "$vim_state/ownership.sha256")" = "$(cat "$installed_control/ownership.sha256")" ] \
+        || fail 'runtime state metadata does not match trusted installation control'
+}
+
+maintenance_version() {
+    mv_state=$1
+    validate_installed_metadata "$mv_state"
+    docker image inspect "$installed_image" >/dev/null 2>&1 \
+        || fail 'installed immutable image digest is unavailable'
+    mv_runtime=$(docker run --rm --read-only \
+        --tmpfs /tmp:rw,exec,nosuid,size=64m,mode=1777 \
+        "$installed_image" --json version) \
+        || fail 'installed image version query failed'
+    printf '%s\n' "$mv_runtime" | grep -Eq '"protocol_version"[[:space:]]*:[[:space:]]*1' \
+        || fail 'installed runtime protocol major is not 1'
+    mv_runtime_version=$(printf '%s\n' "$mv_runtime" \
+        | sed -n 's/.*"version":[[:space:]]*"\([^"]*\)".*/\1/p')
+    [ "$mv_runtime_version" = "$installed_app_version" ] \
+        || fail 'installed runtime version does not match metadata'
+    printf 'launcher_version=%s\nprotocol_version=%s\napplication_version=%s\nimage_reference=%s\nimage_digest=%s\nsource_revision=%s\nplatform=%s\n' \
+        "$installed_launcher_version" "$installed_protocol" "$installed_app_version" \
+        "$installed_image_ref" "$installed_image_digest" "$installed_revision" "$installed_platform"
+}
+
+maintenance_doctor() {
+    md_state=$1
+    md_config=$2
+    md_codex=$3
+    md_skip_account=$4
+    validate_installed_metadata "$md_state"
+    command -v docker >/dev/null 2>&1 || fail 'doctor: Docker CLI is unavailable'
+    docker version >/dev/null 2>&1 || fail 'doctor: Docker daemon is unavailable'
+    docker image inspect "$installed_image" >/dev/null 2>&1 \
+        || fail 'doctor: installed immutable image digest is unavailable'
+    [ -f "$md_config" ] && [ ! -L "$md_config" ] || fail 'doctor: configuration is missing or unsafe'
+    [ -d "$md_state" ] && [ ! -L "$md_state" ] || fail 'doctor: state directory is missing or unsafe'
+    md_probe=$(mktemp "$md_state/.goalrouter-doctor.XXXXXXXX") \
+        || fail 'doctor: state directory is not writable'
+    [ -f "$md_probe" ] && [ ! -L "$md_probe" ] \
+        || fail 'doctor: unsafe state write probe'
+    rm -f "$md_probe" || fail 'doctor: cannot remove state write probe'
+    resolve_directory . project
+    md_project=$resolved_path
+    md_uid=$(id -u) || fail 'doctor: cannot determine current UID'
+    md_gid=$(id -g) || fail 'doctor: cannot determine current GID'
+    docker run --rm --read-only \
+        --tmpfs /tmp:rw,exec,nosuid,size=64m,mode=1777 \
+        --user "$md_uid:$md_gid" \
+        --mount "type=bind,src=$md_config,dst=/config/task-models.yaml,readonly" \
+        --mount "type=bind,src=$md_state,dst=/state" \
+        --mount "type=bind,src=$md_project,dst=/project,readonly" \
+        --env GOALROUTER_CONFIG=/config/task-models.yaml \
+        --env GOALROUTER_STATE_PATH=/state \
+        "$installed_image" config validate >/dev/null \
+        || fail 'doctor: configuration or project mount validation failed'
+    if [ "$md_skip_account" -eq 0 ]; then
+        [ -d "$md_codex" ] && [ ! -L "$md_codex" ] \
+            || fail 'doctor: existing-session authentication source is unavailable'
+        "$0" --config "$md_config" --state-dir "$md_state" --codex-home "$md_codex" \
+            --image "$installed_image" models >/dev/null \
+            || fail 'doctor: non-billable model inventory failed'
+    fi
+    printf 'doctor: ok\n'
+}
+
+maintenance_update() {
+    mu_state=$1
+    mu_version=$2
+    validate_installed_metadata "$mu_state"
+    mu_installer=$installed_bin/goalrouter-install
+    [ -f "$mu_installer" ] && [ -x "$mu_installer" ] && [ ! -L "$mu_installer" ] \
+        || fail 'installed installer is missing or unsafe'
+    read_metadata "$installed_control/owned-bin-dir" owned-bin-dir
+    mu_bin=$metadata_value
+    [ "$mu_bin" = "$installed_bin" ] || fail 'trusted bin ownership is inconsistent'
+    read_metadata "$installed_control/owned-config-dir" owned-config-dir
+    mu_config=$metadata_value
+    read_metadata "$installed_control/owned-state-dir" owned-state-dir
+    mu_owned_state=$metadata_value
+    [ "$mu_owned_state" = "$mu_state" ] || fail 'installed state ownership is inconsistent'
+    read_metadata "$installed_control/owned-codex-home" owned-codex-home
+    mu_codex_home=$metadata_value
+    read_metadata "$installed_control/owned-home" owned-home
+    mu_home=$metadata_value
+    [ "$mu_home" = "$HOME" ] || fail 'current HOME does not match installed lifecycle'
+    read_metadata "$installed_control/release-base" release-base
+    mu_release_base=$metadata_value
+    read_metadata "$installed_control/release-transport" release-transport
+    mu_transport=$metadata_value
+    read_metadata "$installed_control/image-repository" image-repository
+    mu_image_repository=$metadata_value
+    set -- --version "$mu_version" --bin-dir "$mu_bin" --config-dir "$mu_config" \
+        --state-dir "$mu_state" --codex-home "$mu_codex_home" \
+        --image-repository "$mu_image_repository" --yes
+    case $mu_transport in
+        https)
+            case $mu_release_base in
+                https://github.com/vparla/GoalRouter/releases/download/v*) ;;
+                *) set -- "$@" --release-base "$mu_release_base" ;;
+            esac
+            ;;
+        loopback-http)
+            set -- "$@" --release-base "$mu_release_base" --allow-loopback-http
+            ;;
+        *) fail 'invalid installed release transport metadata' ;;
+    esac
+    exec "$mu_installer" "$@"
+}
+
+maintenance_uninstall() {
+    mun_state=$1
+    shift
+    validate_installed_metadata "$mun_state"
+    mun_uninstaller=$installed_bin/goalrouter-uninstall
+    [ -f "$mun_uninstaller" ] && [ -x "$mun_uninstaller" ] && [ ! -L "$mun_uninstaller" ] \
+        || fail 'installed uninstaller is missing or unsafe'
+    read_metadata "$installed_control/owned-config-dir" owned-config-dir
+    mun_config_dir=$metadata_value
+    exec "$mun_uninstaller" --state-dir "$mun_state" --config-dir "$mun_config_dir" "$@"
+}
+
+valid_single_line() {
+    case $1 in
+        '' | *[![:print:]]*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+valid_image_digest() {
+    digest=$1
+    valid_single_line "$digest" || return 1
+    case $digest in
+        sha256:*) digest_hex=${digest#sha256:} ;;
+        *) return 1 ;;
+    esac
+    [ "${#digest_hex}" -eq 64 ] || return 1
+    case $digest_hex in
+        *[!0-9a-f]*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+image_tag='[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}'
+image_path_component='[a-z0-9]+(([.]|__|_|-+)[a-z0-9]+)*'
+image_remote_pattern="^$image_path_component(/$image_path_component)*$"
+domain_component='([A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9-]*[A-Za-z0-9])'
+domain_pattern="^$domain_component([.]$domain_component)*(:[0-9]+)?$"
+ipv6_domain_pattern='^\[[A-Fa-f0-9:]+\](:[0-9]+)?$'
+
+valid_registry_domain() {
+    printf '%s\n' "$1" | grep -Eq "$domain_pattern|$ipv6_domain_pattern"
+}
+
+valid_remote_name() {
+    printf '%s\n' "$1" | grep -Eq "$image_remote_pattern"
+}
+
+valid_named_image_reference() {
+    valid_single_line "$1" || return 1
+    case $1 in
+        -*) return 1 ;;
+    esac
+    reference_name=$1
+    reference_last_component=${reference_name##*/}
+    case $reference_last_component in
+        *:*)
+            reference_tag=${reference_last_component##*:}
+            printf '%s\n' "$reference_tag" | grep -Eq "^$image_tag$" || return 1
+            reference_name=${reference_name%:*}
+            ;;
+    esac
+    [ "${#reference_name}" -le 255 ] || return 1
+    case $reference_name in
+        */*)
+            reference_first=${reference_name%%/*}
+            case $reference_first in
+                localhost | *.* | *:* | \[*\])
+                    valid_registry_domain "$reference_first" || return 1
+                    reference_remote=${reference_name#*/}
+                    ;;
+                *) reference_remote=$reference_name ;;
+            esac
+            ;;
+        *) reference_remote=$reference_name ;;
+    esac
+    valid_remote_name "$reference_remote"
+}
+
+valid_image_reference() {
+    case $1 in
+        *@*) return 1 ;;
+    esac
+    valid_named_image_reference "$1"
+}
+
+valid_image_override() {
+    valid_single_line "$1" || return 1
+    case $1 in
+        *@*)
+            override_name=${1%%@*}
+            override_digest=${1#*@}
+            case $override_digest in
+                *@*) return 1 ;;
+            esac
+            valid_named_image_reference "$override_name" || return 1
+            valid_image_digest "$override_digest"
+            ;;
+        *) valid_named_image_reference "$1" ;;
+    esac
+}
+
+[ -n "${HOME:-}" ] || fail 'HOME is required'
+
+config_base=${XDG_CONFIG_HOME:-"$HOME/.config"}
+state_base=${XDG_STATE_HOME:-"$HOME/.local/state"}
+project_input=.
+access='readonly'
+config_input=$config_base/goalrouter/task-models.yaml
+state_input=$state_base/goalrouter
+codex_input=${CODEX_HOME:-"$HOME/.codex"}
+config_is_explicit=0
+state_is_explicit=0
+codex_is_explicit=0
+image_override=
+image_is_explicit=0
+auth_mode=existing-session
+forward_json=0
+seen_project=0
+seen_access=0
+seen_config=0
+seen_state=0
+seen_codex=0
+seen_image=0
+seen_auth=0
+seen_json=0
+
+while [ "$#" -gt 0 ]; do
+    case $1 in
+        --help)
+            launcher_help
+            exit 0
+            ;;
+        --project | --access | --config | --state-dir | --codex-home | --image | --auth-mode)
+            option=$1
+            [ "$#" -ge 2 ] || fail "$option requires a value"
+            value=$2
+            shift 2
+            case $option in
+                --project)
+                    [ "$seen_project" -eq 0 ] || fail 'duplicate launcher option: --project'
+                    seen_project=1; project_input=$value
+                    ;;
+                --access)
+                    [ "$seen_access" -eq 0 ] || fail 'duplicate launcher option: --access'
+                    seen_access=1; access=$value
+                    ;;
+                --config)
+                    [ "$seen_config" -eq 0 ] || fail 'duplicate launcher option: --config'
+                    seen_config=1; config_input=$value; config_is_explicit=1
+                    ;;
+                --state-dir)
+                    [ "$seen_state" -eq 0 ] || fail 'duplicate launcher option: --state-dir'
+                    seen_state=1; state_input=$value; state_is_explicit=1
+                    ;;
+                --codex-home)
+                    [ "$seen_codex" -eq 0 ] || fail 'duplicate launcher option: --codex-home'
+                    seen_codex=1; codex_input=$value; codex_is_explicit=1
+                    ;;
+                --image)
+                    [ "$seen_image" -eq 0 ] || fail 'duplicate launcher option: --image'
+                    seen_image=1
+                    image_override=$value
+                    image_is_explicit=1
+                    ;;
+                --auth-mode)
+                    [ "$seen_auth" -eq 0 ] || fail 'duplicate launcher option: --auth-mode'
+                    seen_auth=1; auth_mode=$value
+                    ;;
+            esac
+            ;;
+        --json)
+            [ "$seen_json" -eq 0 ] || fail 'duplicate launcher option: --json'
+            seen_json=1
+            forward_json=1
+            shift
+            ;;
+        --*) fail "unknown launcher option: $1" ;;
+        *) break ;;
+    esac
+done
+
+discover_launcher_context
+if [ "$installed_mode" -eq 1 ]; then
+    validate_trusted_control
+    trusted_config_file=$trusted_config_dir/task-models.yaml
+    if [ "$config_is_explicit" -eq 1 ]; then
+        resolve_file "$config_input" config
+        [ "$resolved_path" = "$trusted_config_file" ] \
+            || fail 'explicit configuration does not match trusted installation control'
+    fi
+    if [ "$state_is_explicit" -eq 1 ]; then
+        resolve_directory "$state_input" state
+        [ "$resolved_path" = "$trusted_state_dir" ] \
+            || fail 'explicit state directory does not match trusted installation control'
+    fi
+    if [ "$codex_is_explicit" -eq 1 ]; then
+        resolve_directory "$codex_input" codex
+        [ "$resolved_path" = "$trusted_codex_home" ] \
+            || fail 'explicit Codex home does not match trusted installation control'
+    fi
+    config_input=$trusted_config_file
+    state_input=$trusted_state_dir
+    codex_input=$trusted_codex_home
+    resolve_directory "$state_input" state
+    maintenance_state=$resolved_path
+    validate_installed_metadata "$maintenance_state"
+    if [ "$image_is_explicit" -eq 1 ]; then
+        [ "$image_override" = "$installed_image" ] \
+            || fail 'explicit image does not match trusted installation control'
+    fi
+fi
+
+case $access in
+    readonly | write | docker) ;;
+    *) fail "invalid --access: $access" ;;
+esac
+case $auth_mode in
+    existing-session | api-key) ;;
+    *) fail "invalid --auth-mode: $auth_mode" ;;
+esac
+
+if [ "$#" -gt 0 ]; then
+    maintenance_command=$1
+    if [ "$installed_mode" -eq 1 ]; then
+        case $maintenance_command in
+            version)
+                [ "$#" -eq 1 ] || fail 'version does not accept maintenance options'
+                maintenance_version "$maintenance_state"
+                exit 0
+                ;;
+            doctor)
+                shift
+                doctor_skip_account=0
+                if [ "$#" -gt 0 ]; then
+                    [ "$#" -eq 1 ] && [ "$1" = --skip-account ] \
+                        || fail 'doctor accepts only --skip-account'
+                    doctor_skip_account=1
+                fi
+                maintenance_doctor "$maintenance_state" "$config_input" "$codex_input" "$doctor_skip_account"
+                exit 0
+                ;;
+            update)
+                shift
+                [ "$#" -le 1 ] || fail 'update accepts at most one version'
+                maintenance_update "$maintenance_state" "${1:-latest}"
+                ;;
+            uninstall)
+                shift
+                mun_seen_yes=0
+                mun_seen_purge=0
+                for mun_option do
+                    case $mun_option in
+                        --yes)
+                            [ "$mun_seen_yes" -eq 0 ] || fail 'duplicate uninstall option: --yes'
+                            mun_seen_yes=1
+                            ;;
+                        --purge)
+                            [ "$mun_seen_purge" -eq 0 ] || fail 'duplicate uninstall option: --purge'
+                            mun_seen_purge=1
+                            ;;
+                        *) fail 'uninstall accepts only --yes and --purge' ;;
+                    esac
+                done
+                maintenance_uninstall "$maintenance_state" "$@"
+                ;;
+        esac
+    fi
+fi
+
+resolve_directory "$project_input" project
+project=$resolved_path
+resolve_file "$config_input" config
+config=$resolved_path
+resolve_directory "$state_input" state
+state=$resolved_path
+
+if [ "$auth_mode" = existing-session ]; then
+    resolve_directory "$codex_input" codex
+    codex_home=$resolved_path
+else
+    [ -n "${OPENAI_API_KEY:-}" ] || fail 'OPENAI_API_KEY is required for api-key mode'
+fi
+
+if [ "$installed_mode" -eq 1 ]; then
+    image=$installed_image
+elif [ "$image_is_explicit" -eq 1 ]; then
+    valid_image_override "$image_override" || fail 'invalid --image value'
+    image=$image_override
+else
+    read_metadata "$state/image-ref" image-ref
+    image_ref=$metadata_value
+    valid_image_reference "$image_ref" || fail 'invalid image reference metadata'
+    read_metadata "$state/image-digest" image-digest
+    image_digest=$metadata_value
+    valid_image_digest "$image_digest" || fail 'invalid image digest metadata'
+    image=$image_ref@$image_digest
+fi
+
+native_stderr_file=$(mktemp "${TMPDIR:-/tmp}/goalrouter-preflight.XXXXXX") \
+    || fail 'cannot create required launcher capture file'
+trap 'rm -f "$native_stderr_file"' EXIT HUP INT TERM
+runtime_metadata=$(docker run --rm --read-only \
+    --tmpfs /tmp:rw,exec,nosuid,size=64m,mode=1777 \
+    "$image" --json version 2>"$native_stderr_file") \
+    || fail_native "$(cat "$native_stderr_file")"
+if [ -s "$native_stderr_file" ]; then
+    fail_native "$(cat "$native_stderr_file")"
+fi
+rm -f "$native_stderr_file"
+trap - EXIT HUP INT TERM
+runtime_protocol=$(printf '%s\n' "$runtime_metadata" \
+    | sed -n 's/.*"protocol_version"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p')
+[ -n "$runtime_protocol" ] \
+    || fail 'runtime metadata is missing protocol_version'
+[ "$runtime_protocol" = 1 ] \
+    || fail "Launcher protocol 1 cannot run image protocol $runtime_protocol."
+
+uid=$(id -u) || fail 'cannot determine current UID'
+gid=$(id -g) || fail 'cannot determine current GID'
+
+if [ "$forward_json" -eq 1 ]; then
+    set -- --json "$@"
+fi
+set -- "$image" "$@"
+set -- --user "$uid:$gid" "$@"
+
+if [ "$auth_mode" = existing-session ]; then
+    set -- --env GOALROUTER_CODEX_STAGING_PATH=/tmp/codex-home "$@"
+    set -- --env GOALROUTER_CODEX_HOME=/codex-auth "$@"
+else
+    set -- --env OPENAI_API_KEY "$@"
+fi
+set -- --env "GOALROUTER_AUTH_MODE=$auth_mode" "$@"
+set -- --env GOALROUTER_STATE_PATH=/state "$@"
+set -- --env GOALROUTER_CONFIG=/config/task-models.yaml "$@"
+
+if [ "$access" = docker ]; then
+    set -- --volume /var/run/docker.sock:/var/run/docker.sock:rw "$@"
+fi
+if [ "$auth_mode" = existing-session ]; then
+    set -- --mount "type=bind,src=$codex_home,dst=/codex-auth,readonly" "$@"
+fi
+if [ "$access" = readonly ]; then
+    set -- --mount "type=bind,src=$project,dst=/project,readonly" "$@"
+else
+    set -- --mount "type=bind,src=$project,dst=/project" "$@"
+fi
+set -- --mount "type=bind,src=$config,dst=/config/task-models.yaml,readonly" "$@"
+set -- --mount "type=bind,src=$state,dst=/state" "$@"
+set -- --tmpfs /tmp:rw,exec,nosuid,size=1g,mode=1777 "$@"
+set -- --read-only "$@"
+set -- --rm "$@"
+set -- run "$@"
+
+if [ "$forward_json" -eq 1 ]; then
+    native_stdout_file=$(mktemp "${TMPDIR:-/tmp}/goalrouter-stdout.XXXXXX") \
+        || fail 'cannot create required launcher capture file'
+    native_stderr_file=$(mktemp "${TMPDIR:-/tmp}/goalrouter-stderr.XXXXXX") \
+        || {
+            rm -f "$native_stdout_file"
+            fail 'cannot create required launcher capture file'
+        }
+    trap 'rm -f "$native_stdout_file" "$native_stderr_file"' EXIT HUP INT TERM
+    native_status=0
+    docker "$@" >"$native_stdout_file" 2>"$native_stderr_file" \
+        || native_status=$?
+    if [ "$native_status" -ne 0 ] || [ -s "$native_stderr_file" ]; then
+        native_failure=$(cat "$native_stderr_file"; cat "$native_stdout_file")
+        fail_native "$native_failure"
+    fi
+    cat "$native_stdout_file"
+    rm -f "$native_stdout_file" "$native_stderr_file"
+    trap - EXIT HUP INT TERM
+    exit 0
+fi
+
+exec docker "$@"

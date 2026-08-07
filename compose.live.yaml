@@ -1,0 +1,120 @@
+# SPDX-License-Identifier: MIT
+# File: compose.live.yaml
+# Purpose: Explicit local CLI authority profiles for project and Codex access
+
+x-cli-common: &cli-common
+  image: goalrouter-runtime:local
+  build:
+    context: .
+    target: runtime
+    args:
+      VERSION: ${VERSION:-1.0.0}
+      REVISION: ${REVISION:-local}
+      CREATED: ${CREATED:-1970-01-01T00:00:00Z}
+  environment:
+    GOALROUTER_AUTH_MODE: ${GOALROUTER_AUTH_MODE:-existing-session}
+    GOALROUTER_CODEX_HOME: /codex-auth
+    GOALROUTER_CODEX_STAGING_PATH: /tmp/codex-home
+    GOALROUTER_CONFIG: /config/task-models.yaml
+    GOALROUTER_PLANNER_SCHEMA: /etc/goalrouter/planner-output.schema.json
+    GOALROUTER_PROJECT_PATH: /project
+    GOALROUTER_SCHEMA: /etc/goalrouter/task-models.schema.json
+    GOALROUTER_STATE_PATH: /state
+    CODEX_HOME: /tmp/codex-home
+  read_only: true
+  tmpfs:
+    - /tmp:rw,exec,nosuid,size=1g,mode=1777
+
+services:
+  cli-readonly:
+    <<: *cli-common
+    volumes:
+      - ${GOALROUTER_PROJECT_PATH:?set GOALROUTER_PROJECT_PATH}:/project:ro
+      - ${GOALROUTER_CONFIG_PATH:-./config/task-models.yaml}:/config/task-models.yaml:ro
+      - ${GOALROUTER_CODEX_HOME:?set GOALROUTER_CODEX_HOME}:/codex-auth:ro
+      - ${GOALROUTER_STATE_PATH:?set GOALROUTER_STATE_PATH}:/state:rw
+
+  cli-write:
+    <<: *cli-common
+    volumes:
+      - ${GOALROUTER_PROJECT_PATH:?set GOALROUTER_PROJECT_PATH}:/project:rw
+      - ${GOALROUTER_CONFIG_PATH:-./config/task-models.yaml}:/config/task-models.yaml:ro
+      - ${GOALROUTER_CODEX_HOME:?set GOALROUTER_CODEX_HOME}:/codex-auth:ro
+      - ${GOALROUTER_STATE_PATH:?set GOALROUTER_STATE_PATH}:/state:rw
+
+  cli-docker:
+    <<: *cli-common
+    volumes:
+      - ${GOALROUTER_PROJECT_PATH:?set GOALROUTER_PROJECT_PATH}:/project:rw
+      - ${GOALROUTER_CONFIG_PATH:-./config/task-models.yaml}:/config/task-models.yaml:ro
+      - ${GOALROUTER_CODEX_HOME:?set GOALROUTER_CODEX_HOME}:/codex-auth:ro
+      - ${GOALROUTER_STATE_PATH:?set GOALROUTER_STATE_PATH}:/state:rw
+      - /var/run/docker.sock:/var/run/docker.sock:rw
+
+  validation:
+    image: goalrouter-test:local
+    build:
+      context: .
+      target: test
+    profiles: ["validation"]
+    entrypoint: ["python", "-m", "pytest"]
+    command: ["tests/integration/test_validation_routes.py", "-q"]
+    environment:
+      VALIDATION_PROJECT_ONE: /validation/one
+      VALIDATION_PROJECT_ONE_MOUNTED: ${VALIDATION_PROJECT_ONE:+1}
+      VALIDATION_PROJECT_TWO: /validation/two
+      VALIDATION_PROJECT_TWO_MOUNTED: ${VALIDATION_PROJECT_TWO:+1}
+      VALIDATION_PROJECT_THREE: /validation/three
+      VALIDATION_PROJECT_THREE_MOUNTED: ${VALIDATION_PROJECT_THREE:+1}
+    network_mode: none
+    read_only: true
+    tmpfs:
+      - /tmp:rw,exec,nosuid,size=1g,mode=1777
+    volumes:
+      - ${VALIDATION_PROJECT_ONE:-.}:/validation/one:ro
+      - ${VALIDATION_PROJECT_TWO:-.}:/validation/two:ro
+      - ${VALIDATION_PROJECT_THREE:-.}:/validation/three:ro
+
+  live-test:
+    image: goalrouter-test:local
+    build:
+      context: .
+      target: test
+    profiles: ["live-test"]
+    entrypoint: ["python", "-m", "pytest"]
+    command: ["tests/live/test_codex_smoke.py", "-q"]
+    environment:
+      CODEX_HOME: /tmp/codex-home
+      GOALROUTER_AUTH_MODE: ${GOALROUTER_AUTH_MODE:-existing-session}
+      GOALROUTER_CODEX_HOME: /codex-auth
+      GOALROUTER_CODEX_STAGING_PATH: /tmp/codex-home
+      GOALROUTER_CONFIG: /etc/goalrouter/task-models.yaml
+      GOALROUTER_LIVE_TEST: "1"
+      GOALROUTER_PLANNER_SCHEMA: /etc/goalrouter/planner-output.schema.json
+      GOALROUTER_SCHEMA: /etc/goalrouter/task-models.schema.json
+    read_only: true
+    tmpfs:
+      - /tmp:rw,exec,nosuid,size=1g,mode=1777
+    volumes:
+      - ${GOALROUTER_CODEX_HOME:?set GOALROUTER_CODEX_HOME}:/codex-auth:ro
+
+  live-inventory:
+    image: goalrouter-installer-smoke:local
+    build:
+      context: .
+      target: posix-installer-smoke
+    profiles: ["live-inventory"]
+    working_dir: /workspace
+    entrypoint: ["/bin/sh", "/workspace/scripts/posix-installer-smoke.sh"]
+    environment:
+      DOCKER_BUILDKIT: "1"
+      GOALROUTER_CODEX_HOME_HOST: ${GOALROUTER_CODEX_HOME:?set GOALROUTER_CODEX_HOME}
+      GOALROUTER_INSTALLED_LIVE_INVENTORY: "1"
+      HOME: /tmp/docker-home
+    network_mode: none
+    read_only: true
+    tmpfs:
+      - /tmp:rw,exec,nosuid,size=256m,mode=1777
+    volumes:
+      - .:/workspace:ro
+      - /var/run/docker.sock:/var/run/docker.sock:rw

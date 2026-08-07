@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/goalrouter/task-models.schema.json",
+  "title": "GoalRouter task-model routing configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema-version",
+    "default-task",
+    "planner-task",
+    "completion-task",
+    "maximum-read-concurrency",
+    "repository-inspection-timeout-seconds",
+    "model-aliases",
+    "tasks"
+  ],
+  "properties": {
+    "schema-version": {"const": 1},
+    "default-task": {"$ref": "#/$defs/identifier"},
+    "planner-task": {"$ref": "#/$defs/identifier"},
+    "completion-task": {"$ref": "#/$defs/identifier"},
+    "maximum-read-concurrency": {"type": "integer", "minimum": 1},
+    "repository-inspection-timeout-seconds": {"type": "integer", "minimum": 1},
+    "model-aliases": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {"$ref": "#/$defs/identifier"},
+      "additionalProperties": {"$ref": "#/$defs/model-alias"}
+    },
+    "tasks": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {"$ref": "#/$defs/identifier"},
+      "additionalProperties": {"$ref": "#/$defs/task-policy"}
+    },
+    "matching": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/match-rule"},
+      "default": []
+    },
+    "hard-risk-rules": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/hard-risk-rule"},
+      "default": []
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+    },
+    "model-alias": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model", "reasoning-effort", "rank"],
+      "properties": {
+        "model": {"type": "string", "minLength": 1},
+        "reasoning-effort": {
+          "enum": ["low", "medium", "high", "xhigh", "max", "ultra"]
+        },
+        "rank": {"type": "integer", "minimum": 1}
+      }
+    },
+    "task-policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "description",
+        "model-alias",
+        "sandbox",
+        "approval",
+        "timeout-seconds",
+        "max-attempts"
+      ],
+      "properties": {
+        "description": {"type": "string", "minLength": 1},
+        "model-alias": {"$ref": "#/$defs/identifier"},
+        "sandbox": {"enum": ["read-only", "workspace-write"]},
+        "approval": {"enum": ["automatic", "required"]},
+        "timeout-seconds": {"type": "integer", "minimum": 1},
+        "max-attempts": {"type": "integer", "minimum": 1},
+        "destructive": {"type": "boolean", "default": false},
+        "external-write": {"type": "boolean", "default": false},
+        "escalate-to": {"$ref": "#/$defs/identifier"}
+      }
+    },
+    "match-rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["task"],
+      "properties": {
+        "task": {"$ref": "#/$defs/identifier"},
+        "phrases": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true
+        },
+        "file-globs": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true
+        }
+      },
+      "anyOf": [
+        {"required": ["phrases"]},
+        {"required": ["file-globs"]}
+      ]
+    },
+    "hard-risk-rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["flag"],
+      "properties": {
+        "flag": {"$ref": "#/$defs/identifier"},
+        "minimum-model-alias": {"$ref": "#/$defs/identifier"},
+        "approval": {"enum": ["automatic", "required"]}
+      },
+      "anyOf": [
+        {"required": ["minimum-model-alias"]},
+        {"required": ["approval"]}
+      ]
+    }
+  }
+}

@@ -1,0 +1,190 @@
+# SPDX-License-Identifier: MIT
+# File: compose.yaml
+# Purpose: Canonical deterministic verification services for GoalRouter
+
+services:
+  test:
+    image: goalrouter-test:local
+    build:
+      context: .
+      target: test
+    command: ["python", "-m", "pytest"]
+    network_mode: none
+    read_only: true
+    tmpfs:
+      - /tmp:rw,exec,nosuid,size=1g,mode=1777
+
+  lint:
+    extends:
+      service: test
+    command: ["python", "-m", "ruff", "check", "--no-cache", "src", "tests"]
+
+  typecheck:
+    extends:
+      service: test
+    command: ["python", "-m", "mypy", "--cache-dir", "/tmp/mypy", "src"]
+
+  package:
+    extends:
+      service: test
+    read_only: false
+    command:
+      - "python"
+      - "-m"
+      - "pip"
+      - "wheel"
+      - "--no-deps"
+      - "--no-build-isolation"
+      - "--wheel-dir"
+      - "/tmp/wheels"
+      - "."
+
+  shellcheck:
+    build:
+      context: .
+      target: shell-test
+    working_dir: /workspace
+    command:
+      - shellcheck
+      - -x
+      - scripts/container-entrypoint.sh
+      - scripts/docker-resource-cleanup.sh
+      - scripts/runtime-image-smoke.sh
+      - scripts/runtime-image-smoke-interrupt.sh
+      - scripts/goalrouter
+      - scripts/install.sh
+      - scripts/uninstall.sh
+      - scripts/posix-installer-smoke.sh
+      - scripts/posix-launcher-smoke.sh
+      - scripts/posix-launcher-smoke-safety.sh
+      - scripts/release-assets.sh
+      - tests/fixtures/distribution/fake-docker
+      - tests/fixtures/distribution/fake-cleanup-docker
+      - tests/fixtures/distribution/fake-release/docker
+    network_mode: none
+    read_only: true
+    volumes:
+      - .:/workspace:ro
+
+  runtime-smoke:
+    image: docker:28.3.3-cli@sha256:0135662b510037ea581d99c2e5929c5e01185139c0b86986a418bd4da0b98a44
+    working_dir: /workspace
+    entrypoint: ["/bin/sh", "/workspace/scripts/runtime-image-smoke.sh"]
+    environment:
+      DOCKER_BUILDKIT: "1"
+      HOME: /tmp/docker-home
+    network_mode: none
+    read_only: true
+    tmpfs:
+      - /tmp:rw,exec,nosuid,size=256m,mode=1777
+    volumes:
+      - .:/workspace:ro
+      - /var/run/docker.sock:/var/run/docker.sock:rw
+
+  runtime-smoke-interrupt:
+    image: docker:28.3.3-cli@sha256:0135662b510037ea581d99c2e5929c5e01185139c0b86986a418bd4da0b98a44
+    working_dir: /workspace
+    entrypoint: ["/bin/sh", "/workspace/scripts/runtime-image-smoke-interrupt.sh"]
+    environment:
+      HOME: /tmp/docker-home
+    network_mode: none
+    read_only: true
+    tmpfs:
+      - /tmp:rw,exec,nosuid,size=256m,mode=1777
+    volumes:
+      - .:/workspace:ro
+      - /var/run/docker.sock:/var/run/docker.sock:rw
+
+  posix-launcher-smoke:
+    image: docker:28.3.3-cli@sha256:0135662b510037ea581d99c2e5929c5e01185139c0b86986a418bd4da0b98a44
+    working_dir: /workspace
+    entrypoint: ["/bin/sh", "/workspace/scripts/posix-launcher-smoke.sh"]
+    environment:
+      DOCKER_BUILDKIT: "1"
+      HOME: /tmp/docker-home
+    network_mode: none
+    read_only: true
+    tmpfs:
+      - /tmp:rw,exec,nosuid,size=256m,mode=1777
+    volumes:
+      - .:/workspace:ro
+      - /var/run/docker.sock:/var/run/docker.sock:rw
+
+  posix-launcher-smoke-safety:
+    image: docker:28.3.3-cli@sha256:0135662b510037ea581d99c2e5929c5e01185139c0b86986a418bd4da0b98a44
+    working_dir: /workspace
+    entrypoint: ["/bin/sh", "/workspace/scripts/posix-launcher-smoke-safety.sh"]
+    environment:
+      DOCKER_BUILDKIT: "1"
+      HOME: /tmp/docker-home
+    network_mode: none
+    read_only: true
+    tmpfs:
+      - /tmp:rw,exec,nosuid,size=256m,mode=1777
+    volumes:
+      - .:/workspace:ro
+      - /var/run/docker.sock:/var/run/docker.sock:rw
+
+  posix-installer-smoke:
+    image: goalrouter-installer-smoke:local
+    build:
+      context: .
+      target: posix-installer-smoke
+    working_dir: /workspace
+    entrypoint: ["/bin/sh", "/workspace/scripts/posix-installer-smoke.sh"]
+    environment:
+      HOME: /tmp/docker-home
+    network_mode: none
+    read_only: true
+    tmpfs:
+      - /tmp:rw,exec,nosuid,size=256m,mode=1777
+    volumes:
+      - .:/workspace:ro
+      - /var/run/docker.sock:/var/run/docker.sock:rw
+
+  distribution-test:
+    extends:
+      service: test
+    command: ["python", "-m", "pytest", "tests/distribution", "-q"]
+
+  distribution-integration:
+    extends:
+      service: test
+    network_mode: none
+    read_only: true
+    tmpfs:
+      - /tmp:rw,exec,nosuid,size=1g,mode=1777
+    command:
+      - "python"
+      - "-m"
+      - "pytest"
+      - "tests/distribution/test_launcher_integration.py"
+      - "tests/distribution/test_authority_profiles.py"
+      - "tests/distribution/test_installation_roundtrip.py"
+      - "-q"
+    environment:
+      DOCKER_BUILDKIT: "1"
+      GOALROUTER_DISTRIBUTION_INTEGRATION: "1"
+      HOME: /tmp/docker-home
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:rw
+
+  powershell-test:
+    build:
+      context: .
+      target: powershell-test
+    command:
+      - "sh"
+      - "-ec"
+      - "pwsh -NoLogo -NoProfile -File tests/distribution/powershell_contract.Tests.ps1 && pwsh -NoLogo -NoProfile -File tests/distribution/powershell_lifecycle_contract.Tests.ps1"
+
+  release-assets:
+    image: goalrouter-release-assets:local
+    build:
+      context: .
+      target: release-assets
+    entrypoint: ["/workspace/scripts/release-assets.sh"]
+    network_mode: none
+    read_only: true
+    tmpfs:
+      - /tmp:rw,exec,nosuid,size=256m,mode=1777

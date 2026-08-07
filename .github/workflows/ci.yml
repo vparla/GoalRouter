@@ -1,0 +1,54 @@
+# SPDX-License-Identifier: MIT
+# File: .github/workflows/ci.yml
+# Purpose: Run the deterministic Docker-only continuous integration gates
+
+name: CI
+
+on:
+  pull_request: {}
+  push:
+    branches:
+      - main
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Secret scan
+        if: github.event_name == 'pull_request' || github.event_name == 'push'
+        uses: trufflesecurity/trufflehog@6f3c981e7b77f235fd2702dd74af25fc4b72bf11
+        with:
+          base: ""
+          head: HEAD
+          version: "3.96.0"
+          extra_args: --results=verified,unknown
+      - name: Dependency review
+        if: github.event_name == 'pull_request'
+        uses: actions/dependency-review-action@v4
+      - name: Check Dockerfile warnings
+        run: docker compose build --check
+      - name: Build declared verification images
+        run: docker compose build
+      - name: Test
+        run: docker compose run --rm test
+      - name: Lint
+        run: docker compose run --rm lint
+      - name: Type check
+        run: docker compose run --rm typecheck
+      - name: Package
+        run: docker compose run --rm package
+      - name: Shell contracts
+        run: docker compose run --rm shellcheck
+      - name: PowerShell contracts
+        run: docker compose run --rm powershell-test
+      - name: Distribution contracts
+        run: docker compose run --rm distribution-test
