@@ -16,8 +16,8 @@ from goalrouter.cli import build_parser
 ROOT = Path(__file__).resolve().parents[2]
 
 WINDOWS_INSTALL_COMMAND = r".\install.ps1 -Version $Version -Yes"
-LINUX_INSTALL_COMMAND = "./install.sh --version 1.0.5 --yes"
-MACOS_INSTALL_COMMAND = "./install.sh --version 1.0.5 --yes"
+LINUX_INSTALL_COMMAND = "./install.sh --version 1.0.6 --yes"
+MACOS_INSTALL_COMMAND = "./install.sh --version 1.0.6 --yes"
 
 
 def _heading_block(content: str, heading: str) -> str:
@@ -281,9 +281,9 @@ def test_documented_lifecycle_commands_match_platform_grammar() -> None:
 
     for commands in (readme, installation):
         assert {WINDOWS_INSTALL_COMMAND, LINUX_INSTALL_COMMAND} <= commands
-        assert r".\install.ps1 -Version 1.0.5" not in commands
-        assert "./install.sh --version 1.0.5" not in commands
-    assert {"goalrouter update", "goalrouter update 1.0.5"} <= upgrading
+        assert r".\install.ps1 -Version 1.0.6" not in commands
+        assert "./install.sh --version 1.0.6" not in commands
+    assert {"goalrouter update", "goalrouter update 1.0.6"} <= upgrading
     assert {
         "goalrouter uninstall",
         "goalrouter uninstall --yes",

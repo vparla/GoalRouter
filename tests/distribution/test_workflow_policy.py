@@ -241,7 +241,7 @@ def _expected_native_build_run(platform: str, architecture: str) -> str:
     )
     return f"""set -euo pipefail
 image=ghcr.io/vparla/goalrouter
-version=1.0.5
+version=1.0.6
 revision="$GITHUB_SHA"
 created=$(git show -s --format=%cI "$GITHUB_SHA")
 temporary_tag="$image:tmp-${{GITHUB_SHA:0:12}}-{architecture}"
@@ -376,9 +376,9 @@ def _assert_publish_policy(workflow: Mapping[str, Any]) -> None:
             "docker compose run --rm --no-deps \\",
             '  -v "$parent:/release" \\',
             "  release-assets \\",
-            "  --version 1.0.5 \\",
+            "  --version 1.0.6 \\",
             '  --tag "$GITHUB_REF_NAME" \\',
-            "  --image ghcr.io/vparla/goalrouter:1.0.5 \\",
+            "  --image ghcr.io/vparla/goalrouter:1.0.6 \\",
             '  --image-digest "sha256:' + ("0" * 64) + '" \\',
             '  --source-revision "$GITHUB_SHA" \\',
             '  --source-date-epoch "$source_date_epoch" \\',
@@ -565,9 +565,9 @@ def _assert_publish_policy(workflow: Mapping[str, Any]) -> None:
         "application/vnd.docker.distribution.manifest.v2+json",
     ):
         assert guard_run.count(media_type) == 2
-    assert 'test "$GITHUB_REF_NAME" = v1.0.5' in guard_run
-    assert "for tag in v1.0.5 1.0.5; do" in guard_run
-    assert "for tag in v1.0.5 1.0.5 1.0" not in guard_run
+    assert 'test "$GITHUB_REF_NAME" = v1.0.6' in guard_run
+    assert "for tag in v1.0.6 1.0.6; do" in guard_run
+    assert "for tag in v1.0.6 1.0.6 1.0" not in guard_run
     assert "https://ghcr.io/v2/vparla/goalrouter/manifests/$tag" in guard_run
     assert '"200")' in guard_run
     assert '"404")' in guard_run
@@ -577,12 +577,12 @@ def _assert_publish_policy(workflow: Mapping[str, Any]) -> None:
     assert "immutable GHCR tag already exists" in guard_run
     assert "GitHub Release already exists" in guard_run
     assert "resolve_existing_digest()" in guard_run
-    assert "prior_digest=$(resolve_existing_digest 1.0.4 prior-immutable)" in guard_run
+    assert "prior_digest=$(resolve_existing_digest 1.0.5 prior-immutable)" in guard_run
     assert "for tag in 1.0 1 latest; do" in guard_run
     assert 'moving_digest=$(resolve_existing_digest "$tag" moving)' in guard_run
     assert 'test "$moving_digest" = "$prior_digest"' in guard_run
     assert "GHCR alias is missing" in guard_run
-    assert "moving GHCR alias diverged from 1.0.4" in guard_run
+    assert "moving GHCR alias diverged from 1.0.5" in guard_run
     assert "GHCR alias returned multiple digests" in guard_run
     assert (
         '  case "$status" in\n'
@@ -642,8 +642,8 @@ def _assert_publish_policy(workflow: Mapping[str, Any]) -> None:
     assert set(stable_aliases) == {"name", "run"}
     stable_aliases_run = stable_aliases["run"]
     assert re.findall(r'--tag "\$image:([^\"]+)"', stable_aliases_run) == [
-        "v1.0.5",
-        "1.0.5",
+        "v1.0.6",
+        "1.0.6",
         "1.0",
         "1",
         "latest",
@@ -654,7 +654,7 @@ def _assert_publish_policy(workflow: Mapping[str, Any]) -> None:
     assert "needs.build-arm64.outputs.digest" not in stable_aliases_run
     assert "containerimage.descriptor" in stable_aliases_run
     assert 'test "$aliased_digest" = "${{ steps.index.outputs.digest }}"' in stable_aliases_run
-    assert "for tag in v1.0.5 1.0.5 1.0 1 latest; do" in stable_aliases_run
+    assert "for tag in v1.0.6 1.0.6 1.0 1 latest; do" in stable_aliases_run
     assert "docker buildx imagetools inspect" in stable_aliases_run
     assert '"$image:$tag"' in stable_aliases_run
     assert "--format '{{json .Manifest}}'" in stable_aliases_run
@@ -683,8 +683,8 @@ def _assert_publish_policy(workflow: Mapping[str, Any]) -> None:
     assert "--generate-notes" in release_run
     expected_assets = [
         "SHA256SUMS",
-        "goalrouter-1.0.5-unix.tar.gz",
-        "goalrouter-1.0.5-windows.zip",
+        "goalrouter-1.0.6-unix.tar.gz",
+        "goalrouter-1.0.6-windows.zip",
         "install.ps1",
         "install.sh",
         "release-manifest.json",
@@ -1107,7 +1107,7 @@ def test_publish_policy_rejects_tag_attestation_release_and_action_mutations() -
         step for step in stable_steps if step["name"] == "Verify immutable release is absent"
     )
     guard["run"] = guard["run"].replace(
-        "for tag in v1.0.5 1.0.5; do", "for tag in v1.0.5; do"
+        "for tag in v1.0.6 1.0.6; do", "for tag in v1.0.6; do"
     )
     with pytest.raises(AssertionError):
         _assert_publish_policy(workflow)
