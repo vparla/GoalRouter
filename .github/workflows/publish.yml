@@ -295,7 +295,7 @@ jobs:
               --output "$RUNNER_TEMP/ghcr-$tag.json" \
               --write-out '%{http_code}' \
               --header "Authorization: Bearer $registry_token" \
-              --header 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json' \
+              --header 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json' \
               "https://ghcr.io/v2/vparla/goalrouter/manifests/$tag")
             case "$status" in
               "200") printf 'immutable GHCR tag already exists: %s\n' "$tag" >&2; exit 1 ;;
@@ -312,7 +312,7 @@ jobs:
               --output "$RUNNER_TEMP/ghcr-$tag.json" \
               --write-out '%{http_code}' \
               --header "Authorization: Bearer $registry_token" \
-              --header 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json' \
+              --header 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json' \
               "https://ghcr.io/v2/vparla/goalrouter/manifests/$tag")
             case "$status" in
               "200") ;;
@@ -409,6 +409,73 @@ jobs:
           subject-digest: ${{ steps.index.outputs.digest }}
           push-to-registry: true
           create-storage-record: false
+      - name: Revalidate stable publication preconditions
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF_NAME" = v1.0.1
+          registry_token=$(curl --fail-with-body --silent --show-error \
+            --user "$GITHUB_ACTOR:$GH_TOKEN" \
+            "https://ghcr.io/token?scope=repository:vparla/goalrouter:pull" \
+            | jq -er '.token | strings | select(length > 0)')
+          for tag in v1.0.1 1.0.1; do
+            status=$(curl --silent --show-error \
+              --output "$RUNNER_TEMP/ghcr-$tag.json" \
+              --write-out '%{http_code}' \
+              --header "Authorization: Bearer $registry_token" \
+              --header 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json' \
+              "https://ghcr.io/v2/vparla/goalrouter/manifests/$tag")
+            case "$status" in
+              "200") printf 'immutable GHCR tag already exists: %s\n' "$tag" >&2; exit 1 ;;
+              "404") ;;
+              *) printf 'unexpected GHCR status for %s: %s\n' "$tag" "$status" >&2; exit 1 ;;
+            esac
+          done
+          resolve_existing_digest() {
+            tag=$1
+            alias_kind=$2
+            headers="$RUNNER_TEMP/ghcr-$tag.headers"
+            status=$(curl --silent --show-error \
+              --dump-header "$headers" \
+              --output "$RUNNER_TEMP/ghcr-$tag.json" \
+              --write-out '%{http_code}' \
+              --header "Authorization: Bearer $registry_token" \
+              --header 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json' \
+              "https://ghcr.io/v2/vparla/goalrouter/manifests/$tag")
+            case "$status" in
+              "200") ;;
+              "404") printf '%s GHCR alias is missing: %s\n' "$alias_kind" "$tag" >&2; exit 1 ;;
+              *) printf 'unexpected GHCR status for %s: %s\n' "$tag" "$status" >&2; exit 1 ;;
+            esac
+            digest_count=$(sed -n 's/^[Dd]ocker-[Cc]ontent-[Dd]igest:[[:space:]]*\(sha256:[0-9a-f]\{64\}\)\r*$/\1/p' "$headers" | wc -l | tr -d '[:space:]')
+            test "$digest_count" = 1 || {
+              printf 'GHCR alias returned multiple digests or no valid OCI digest: %s\n' "$tag" >&2
+              exit 1
+            }
+            sed -n 's/^[Dd]ocker-[Cc]ontent-[Dd]igest:[[:space:]]*\(sha256:[0-9a-f]\{64\}\)\r*$/\1/p' "$headers"
+          }
+          prior_digest=$(resolve_existing_digest 1.0.0 prior-immutable)
+          for tag in 1.0 1 latest; do
+            moving_digest=$(resolve_existing_digest "$tag" moving)
+            test "$moving_digest" = "$prior_digest" || {
+              printf 'moving GHCR alias diverged from 1.0.0: %s\n' "$tag" >&2
+              exit 1
+            }
+          done
+          release_status=$(curl --silent --show-error \
+            --output "$RUNNER_TEMP/github-release.json" \
+            --write-out '%{http_code}' \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2022-11-28' \
+            --header 'User-Agent: GoalRouter-release-workflow' \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/$GITHUB_REF_NAME")
+          case "$release_status" in
+            "200") printf 'GitHub Release already exists: %s\n' "$GITHUB_REF_NAME" >&2; exit 1 ;;
+            "404") ;;
+            *) printf 'unexpected GitHub Release status: %s\n' "$release_status" >&2; exit 1 ;;
+          esac
       - name: Publish stable image aliases
         run: |
           set -euo pipefail

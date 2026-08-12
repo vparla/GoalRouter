@@ -72,7 +72,10 @@ are approved moving aliases. For a patch release, the workflow resolves the prio
 immutable patch image and advances the moving aliases only after proving that all three
 still resolve to that exact prior digest. A missing, malformed, unauthorized, unexpected,
 or divergent moving alias blocks publication; divergence is a release incident and must
-not be repaired by overwriting immutable evidence.
+not be repaired by overwriting immutable evidence. The workflow repeats the complete
+authenticated immutable-name, GitHub Release, prior-digest, and moving-alias precondition
+check immediately before the overwrite-capable stable alias command so expensive asset and
+attestation work cannot leave stale publication assumptions.
 
 ## Release assets
 

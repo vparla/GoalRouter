@@ -15,7 +15,7 @@ from goalrouter.cli import build_parser
 
 ROOT = Path(__file__).resolve().parents[2]
 
-WINDOWS_INSTALL_COMMAND = r".\install.ps1 -Version 1.0.1 -Yes"
+WINDOWS_INSTALL_COMMAND = r".\install.ps1 -Version $Version -Yes"
 LINUX_INSTALL_COMMAND = "./install.sh --version 1.0.1 --yes"
 MACOS_INSTALL_COMMAND = "./install.sh --version 1.0.1 --yes"
 

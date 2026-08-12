@@ -543,6 +543,7 @@ def _assert_publish_policy(workflow: Mapping[str, Any]) -> None:
         "Verify release assets",
         "Publish temporary image index",
         "Attest image index",
+        "Revalidate stable publication preconditions",
         "Publish stable image aliases",
         "Create GitHub Release",
     ]
@@ -557,6 +558,13 @@ def _assert_publish_policy(workflow: Mapping[str, Any]) -> None:
     guard_run = immutable_guard["run"]
     assert isinstance(guard_run, str)
     assert "https://ghcr.io/token?scope=repository:vparla/goalrouter:pull" in guard_run
+    for media_type in (
+        "application/vnd.oci.image.index.v1+json",
+        "application/vnd.docker.distribution.manifest.list.v2+json",
+        "application/vnd.oci.image.manifest.v1+json",
+        "application/vnd.docker.distribution.manifest.v2+json",
+    ):
+        assert guard_run.count(media_type) == 2
     assert 'test "$GITHUB_REF_NAME" = v1.0.1' in guard_run
     assert "for tag in v1.0.1 1.0.1; do" in guard_run
     assert "for tag in v1.0.1 1.0.1 1.0" not in guard_run
@@ -594,6 +602,14 @@ def _assert_publish_policy(workflow: Mapping[str, Any]) -> None:
         "exit 1 ;;\n"
         "esac"
     ) in guard_run
+    final_guard = stable_steps["Revalidate stable publication preconditions"]
+    assert set(final_guard) == {"name", "env", "run"}
+    assert final_guard["env"] == {"GH_TOKEN": "${{ secrets.GITHUB_TOKEN }}"}
+    assert final_guard["run"] == guard_run
+    stable_order = list(stable_steps)
+    assert stable_order.index("Revalidate stable publication preconditions") + 1 == (
+        stable_order.index("Publish stable image aliases")
+    )
     prepare = stable_steps["Prepare image index"]
     assert set(prepare) == {"name", "id", "run"}
     assert prepare["id"] == "index"
@@ -999,6 +1015,72 @@ def test_publish_policy_rejects_tag_attestation_release_and_action_mutations() -
     workflow = copy.deepcopy(_load_yaml(PUBLISH_PATH))
     edge = workflow["jobs"]["publish-edge"]["steps"][1]
     edge["run"] = edge["run"].replace('$image:edge', '$image:latest')
+    with pytest.raises(AssertionError):
+        _assert_publish_policy(workflow)
+
+    for media_type in (
+        "application/vnd.oci.image.manifest.v1+json",
+        "application/vnd.docker.distribution.manifest.v2+json",
+    ):
+        workflow = copy.deepcopy(_load_yaml(PUBLISH_PATH))
+        stable_steps = workflow["jobs"]["publish-stable"]["steps"]
+        guard = next(
+            step
+            for step in stable_steps
+            if step["name"] == "Verify immutable release is absent"
+        )
+        guard["run"] = guard["run"].replace(f", {media_type}", "")
+        with pytest.raises(AssertionError):
+            _assert_publish_policy(workflow)
+
+    workflow = copy.deepcopy(_load_yaml(PUBLISH_PATH))
+    stable_steps = workflow["jobs"]["publish-stable"]["steps"]
+    final_guard_index = next(
+        (
+            index
+            for index, step in enumerate(stable_steps)
+            if step["name"] == "Revalidate stable publication preconditions"
+        ),
+        None,
+    )
+    assert final_guard_index is not None
+    del stable_steps[final_guard_index]
+    with pytest.raises(AssertionError):
+        _assert_publish_policy(workflow)
+
+    workflow = copy.deepcopy(_load_yaml(PUBLISH_PATH))
+    stable_steps = workflow["jobs"]["publish-stable"]["steps"]
+    final_guard_index = next(
+        (
+            index
+            for index, step in enumerate(stable_steps)
+            if step["name"] == "Revalidate stable publication preconditions"
+        ),
+        None,
+    )
+    assert final_guard_index is not None
+    stable_steps[final_guard_index - 1], stable_steps[final_guard_index] = (
+        stable_steps[final_guard_index],
+        stable_steps[final_guard_index - 1],
+    )
+    with pytest.raises(AssertionError):
+        _assert_publish_policy(workflow)
+
+    workflow = copy.deepcopy(_load_yaml(PUBLISH_PATH))
+    stable_steps = workflow["jobs"]["publish-stable"]["steps"]
+    final_guard = next(
+        (
+            step
+            for step in stable_steps
+            if step["name"] == "Revalidate stable publication preconditions"
+        ),
+        None,
+    )
+    assert final_guard is not None
+    final_guard["run"] = final_guard["run"].replace(
+        'test "$moving_digest" = "$prior_digest"',
+        ': # divergent moving alias accepted during final recheck',
+    )
     with pytest.raises(AssertionError):
         _assert_publish_policy(workflow)
 

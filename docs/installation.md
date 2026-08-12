@@ -36,7 +36,7 @@ foreach ($File in @('install.ps1', "goalrouter-$Version-windows.zip")) {
     if ($Actual -cne $Expected) { throw "$File checksum mismatch" }
 }
 Expand-Archive -Path ".\goalrouter-$Version-windows.zip" -DestinationPath ".\goalrouter-$Version" -WhatIf
-.\install.ps1 -Version 1.0.1 -Yes
+.\install.ps1 -Version $Version -Yes
 ```
 
 The installation defaults are:
