@@ -1818,6 +1818,46 @@ Invoke-Contract 'installed version validates the same Codex session-file boundar
     }
 }
 
+Invoke-Contract 'Codex session security verifiers reject before doctor or version native execution' {
+    $priorNativeInvoker = $script:GoalRouterNativeInvoker
+    $priorPathVerifier = $script:GoalRouterPhysicalPathSecurityVerifier
+    $priorAncestorVerifier = $script:GoalRouterPhysicalAncestorSecurityVerifier
+    $nativeCalls = [System.Collections.ArrayList]::new()
+    $script:GoalRouterNativeInvoker = {
+        param([string]$FilePath, [string[]]$Arguments, [bool]$CaptureOutput)
+        [void]$nativeCalls.Add(($Arguments -join ' '))
+        return [pscustomobject]@{ ExitCode = 0; Output = @('{"version":"1.0.0","protocol_version":1}') }
+    }.GetNewClosure()
+    $fixtureRoot = Join-Path ([IO.Path]::GetTempPath()) ('goalrouter-session-security-' + [guid]::NewGuid().ToString('N'))
+    $authRoot = Join-Path $fixtureRoot 'codex'
+    $authFile = Join-Path $authRoot 'auth.json'
+    [void][IO.Directory]::CreateDirectory($authRoot)
+    ([IO.File]::Create($authFile)).Dispose()
+    try {
+        $context = [pscustomobject]@{ Distribution = 'Ubuntu'; Image = 'registry/router@sha256:' + ('a' * 64); Config = '/config'; State = '/state'; Project = '/project'; CodexHome = '/codex'; CodexWindows = $authRoot; AuthMode = 'existing-session'; Access = 'readonly'; Json = $false; Forwarded = @() }
+        $manifest = [pscustomobject]@{ version = '1.0.0'; protocol_version = 1; launcher_version = '1.0.0'; image_reference = 'registry/router'; image_digest = 'sha256:' + ('a' * 64); source_revision = 'fixture'; image_platform = 'linux/amd64'; wsl_distribution = 'Ubuntu' }
+
+        $script:GoalRouterPhysicalAncestorSecurityVerifier = { param([string]$Path) }
+        $script:GoalRouterPhysicalPathSecurityVerifier = { param([string]$Path); if ($Path -ceq $authRoot) { throw 'root physical security rejected' } }.GetNewClosure()
+        Assert-Throws { Invoke-GoalRouterInstalledDoctor -Context $context -SkipAccount $true } 'root physical security rejected' 'doctor root physical security verifier'
+        Assert-Equal $nativeCalls.Count 0 'root physical rejection precedes doctor native execution'
+
+        $script:GoalRouterPhysicalPathSecurityVerifier = { param([string]$Path); if ($Path -ceq $authFile) { throw 'session file physical security rejected' } }.GetNewClosure()
+        Assert-Throws { Invoke-GoalRouterInstalledVersion -Context $context -Manifest $manifest -AsJson $true } 'session file physical security rejected' 'version session-file physical security verifier'
+        Assert-Equal $nativeCalls.Count 0 'session-file physical rejection precedes version native execution'
+
+        $script:GoalRouterPhysicalPathSecurityVerifier = { param([string]$Path) }
+        $script:GoalRouterPhysicalAncestorSecurityVerifier = { param([string]$Path); if ($Path -ceq $fixtureRoot) { throw 'ancestor-chain security rejected' } }.GetNewClosure()
+        Assert-Throws { Invoke-GoalRouterInstalledDoctor -Context $context -SkipAccount $true } 'ancestor-chain security rejected' 'doctor ancestor-chain security verifier'
+        Assert-Equal $nativeCalls.Count 0 'ancestor-chain rejection precedes doctor native execution'
+    } finally {
+        $script:GoalRouterNativeInvoker = $priorNativeInvoker
+        $script:GoalRouterPhysicalPathSecurityVerifier = $priorPathVerifier
+        $script:GoalRouterPhysicalAncestorSecurityVerifier = $priorAncestorVerifier
+        Remove-Item -LiteralPath $fixtureRoot -Recurse -ErrorAction Stop
+    }
+}
+
 Invoke-Contract 'production rollback snapshot preserves bytes attributes and Windows security descriptor' {
     $source = [IO.File]::ReadAllText($installer)
     foreach ($required in @('ReadAllBytes', 'WriteAllBytes', 'GetSecurityDescriptorSddlForm', 'SetSecurityDescriptorSddlForm', 'SetAttributes')) { Assert-True $source.Contains($required) "rollback metadata primitive $required" }
