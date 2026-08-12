@@ -643,13 +643,20 @@ function Ensure-GoalRouterDirectoryChain {
 }
 
 function New-GoalRouterProductionLifecyclePorts {
-    param([scriptblock]$AtomicReplaceInvoker)
+    param([scriptblock]$AtomicReplaceInvoker, [scriptblock]$AtomicReplaceTempCleanup)
     if ($null -eq $AtomicReplaceInvoker) {
         $atomicReplaceMethod = [IO.File].GetMethod('Replace', [Type[]]@([string], [string], [string], [bool]))
         if ($null -eq $atomicReplaceMethod) { throw 'required System.IO.File.Replace overload is unavailable' }
         $AtomicReplaceInvoker = { param([object[]]$Arguments); [void]$atomicReplaceMethod.Invoke($null, $Arguments) }.GetNewClosure()
     }
     $invokeAtomicReplace = $AtomicReplaceInvoker
+    if ($null -eq $AtomicReplaceTempCleanup) {
+        $AtomicReplaceTempCleanup = {
+            param([string]$Path)
+            if (Test-Path -LiteralPath $Path -PathType Leaf) { Remove-Item -LiteralPath $Path -Force -ErrorAction Stop }
+        }
+    }
+    $cleanupAtomicReplaceTemp = $AtomicReplaceTempCleanup
     $native = {
         param([string]$FilePath, [string[]]$Arguments, [bool]$CaptureOutput)
         $output = @(& $FilePath @Arguments 2>&1)
@@ -902,10 +909,15 @@ namespace GoalRouter {
             }
         } catch {
             $failure = $_
-            if (Test-Path -LiteralPath $temporary -PathType Leaf) { Remove-Item -LiteralPath $temporary -Force -ErrorAction Stop }
-            if ($failure.Exception -is [Management.Automation.MethodInvocationException] -and $null -ne $failure.Exception.InnerException) {
-                throw $failure.Exception.InnerException
+            $cleanupFailure = $null
+            try { & $cleanupAtomicReplaceTemp -Path ([string]$temporary) }
+            catch { $cleanupFailure = $_.Exception }
+            $primaryException = if ($failure.Exception -is [Management.Automation.MethodInvocationException] -and $null -ne $failure.Exception.InnerException) { $failure.Exception.InnerException } else { $failure.Exception }
+            if ($null -ne $cleanupFailure) {
+                $primaryException.Data['GoalRouterAtomicReplaceCleanupFailure'] = $cleanupFailure.Message
+                throw $primaryException
             }
+            if ($primaryException -cne $failure.Exception) { throw $primaryException }
             throw $failure
         }
     }.GetNewClosure()

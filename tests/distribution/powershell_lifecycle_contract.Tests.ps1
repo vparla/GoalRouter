@@ -1663,9 +1663,10 @@ Invoke-Contract 'recovery journal is one atomic checksummed record and self-remo
     Assert-True $replaceBlock.Contains('& $invokeAtomicReplace $replaceArguments') 'replacement sends the raw argument array to the internal reflection invoker'
     Assert-True (-not $replaceBlock.Contains('Move-Item -LiteralPath $Path -Destination $backup')) 'existing target is never moved away before replacement'
     Assert-True (-not $replaceBlock.Contains("'.bak'")) 'atomic replacement creates no untracked backup residue'
-    Assert-True $replaceBlock.Contains('if (Test-Path -LiteralPath $temporary -PathType Leaf) { Remove-Item -LiteralPath $temporary -Force -ErrorAction Stop }') 'failed replacement forcibly removes its known same-parent temporary file'
+    Assert-True $installerSource.Contains('Remove-Item -LiteralPath $Path -Force -ErrorAction Stop') 'failed replacement forcibly removes its known same-parent temporary file'
     Assert-True $replaceBlock.Contains('$failure.Exception -is [Management.Automation.MethodInvocationException]') 'reflection binder failures are identified after temporary cleanup'
-    Assert-True $replaceBlock.Contains('throw $failure.Exception.InnerException') 'reflection binder failures expose the underlying replacement exception object'
+    Assert-True $replaceBlock.Contains("`$primaryException.Data['GoalRouterAtomicReplaceCleanupFailure'] = `$cleanupFailure.Message") 'cleanup failure is retained separately on the primary replacement exception'
+    Assert-True $replaceBlock.Contains('if ($primaryException -cne $failure.Exception) { throw $primaryException }') 'reflection binder failures expose the underlying replacement exception object'
     Assert-True $replaceBlock.Contains('throw $failure') 'replacement failure remains unchanged after cleanup'
 }
 
@@ -1762,6 +1763,43 @@ Invoke-Contract 'production replacement cleans its temporary file and preserves 
         Assert-Equal $caught.Exception.Message 'fixture atomic replacement failure' 'underlying replacement message is preserved exactly'
         Assert-Equal @(Get-ChildItem -LiteralPath $fixtureRoot -Force | ForEach-Object { $_.Name }) @('install.json') 'failed replacement removes its same-parent temporary file'
         Assert-Equal ([IO.File]::ReadAllText($destination)) 'old' 'failed replacement leaves the destination unchanged'
+    } finally {
+        if (Test-Path -LiteralPath $fixtureRoot) { Remove-Item -LiteralPath $fixtureRoot -Recurse -Force -ErrorAction Stop }
+    }
+}
+
+Invoke-Contract 'production replacement preserves its primary failure when temporary cleanup also fails' {
+    $fixtureRoot = Join-Path '/tmp' ('goalrouter-replace-cleanup-failure-' + [guid]::NewGuid().ToString('N'))
+    [void][IO.Directory]::CreateDirectory($fixtureRoot)
+    try {
+        $destination = Join-Path $fixtureRoot 'install.json'
+        [IO.File]::WriteAllText($destination, 'old')
+        [GoalRouter.Testing.AtomicReplaceFixture]::Reset($true)
+        $fixtureMethod = [GoalRouter.Testing.AtomicReplaceFixture].GetMethod('Replace', [Type[]]@([string], [string], [string], [bool]))
+        $invoker = { param([object[]]$Arguments); [void]$fixtureMethod.Invoke($null, $Arguments) }.GetNewClosure()
+        $cleanupPaths = [Collections.ArrayList]::new()
+        $cleanup = {
+            param([string]$Path)
+            [void]$cleanupPaths.Add($Path)
+            throw [UnauthorizedAccessException]::new('fixture temporary cleanup failure')
+        }.GetNewClosure()
+        $ports = New-GoalRouterProductionLifecyclePorts -AtomicReplaceInvoker $invoker -AtomicReplaceTempCleanup $cleanup
+        $caught = $null
+        $priorErrorCount = $Error.Count
+
+        try { & $ports.Replace -Path $destination -Content 'new' } catch { $caught = $_ }
+
+        $addedErrorCount = $Error.Count - $priorErrorCount
+        for ($index = 0; $index -lt $addedErrorCount; $index++) { $Error.RemoveAt(0) }
+        Assert-True ($null -ne $caught) 'replacement and cleanup failure throws'
+        Assert-True ($caught.Exception -is [IO.IOException]) 'cleanup failure does not replace the primary IOException'
+        Assert-True ($caught.Exception -isnot [Reflection.TargetInvocationException]) 'cleanup failure does not restore the reflection wrapper'
+        Assert-Equal $caught.Exception.Message 'fixture atomic replacement failure' 'cleanup failure preserves the primary message exactly'
+        Assert-Equal $caught.Exception.Data['GoalRouterAtomicReplaceCleanupFailure'] 'fixture temporary cleanup failure' 'cleanup failure is retained separately on the primary exception'
+        Assert-Equal $cleanupPaths.Count 1 'temporary cleanup is attempted exactly once'
+        Assert-True ([IO.Path]::GetFileName([string]$cleanupPaths[0]).StartsWith('.goalrouter-')) 'cleanup receives the known same-parent temporary path'
+        Assert-Equal ([IO.Path]::GetDirectoryName([string]$cleanupPaths[0])) ([IO.Path]::GetDirectoryName($destination)) 'cleanup temporary remains in the destination parent'
+        Assert-Equal ([IO.File]::ReadAllText($destination)) 'old' 'dual failure leaves the destination unchanged'
     } finally {
         if (Test-Path -LiteralPath $fixtureRoot) { Remove-Item -LiteralPath $fixtureRoot -Recurse -Force -ErrorAction Stop }
     }
