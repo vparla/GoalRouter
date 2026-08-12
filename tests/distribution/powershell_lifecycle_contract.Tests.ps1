@@ -663,6 +663,7 @@ function New-FullInstallerFixture {
         ThrowRemovePath = $null
         ResolveOverrides = @{}
         Removals = [System.Collections.ArrayList]::new()
+        StagingBases = [System.Collections.ArrayList]::new()
     }
     foreach ($hostRoot in @('C:\Users\Me', 'C:\Users\Me\AppData\Roaming', 'C:\Users\Me\AppData\Local')) { [void]$fixture.Directories.Add($hostRoot) }
     $hostInfo = {
@@ -675,7 +676,11 @@ function New-FullInstallerFixture {
         $exists = $fixture.Files.ContainsKey($Path) -or $fixture.Directories.Contains($Path) -or $Path -in @('D:\Codex', 'D:\Project')
         return [pscustomobject]@{ Path = $Path; ProviderName = 'FileSystem'; ProviderPath = $Path; Exists = $exists; IsContainer = $Kind -ceq 'Directory'; IsLeaf = $Kind -ceq 'File'; IsReparsePoint = $false; ParentIsReparsePoint = $false; OwnerMatchesCurrentUser = $true; OwnerIsTrusted = $true; AclIsSafe = $true; AncestorChainIsSafe = $true }
     }.GetNewClosure()
-    $newWork = { return 'C:\Temp\goalrouter-random-stage' }.GetNewClosure()
+    $newWork = {
+        param([string]$StagingBase)
+        [void]$fixture.StagingBases.Add($StagingBase)
+        return Join-GoalRouterWindowsPath $StagingBase 'goalrouter-random-stage'
+    }.GetNewClosure()
     $resolveLatest = { return [string]$fixture.Version }.GetNewClosure()
     $download = {
         param([string]$Uri, [string]$Destination, [bool]$AllowLoopbackHttp)
@@ -768,6 +773,7 @@ function New-FullInstallOptions {
 Invoke-Contract 'public install composition validates then installs custom layout with immutable parity' {
     $fixture = New-FullInstallerFixture
     Invoke-GoalRouterWindowsInstall -Options (New-FullInstallOptions) -Ports $fixture.Ports
+    Assert-Equal $fixture.State.StagingBases @('C:\Users\Me\AppData\Local') 'complete install stages under exact local AppData root'
     Assert-Equal $fixture.State.Files['D:\Install\bin\goalrouter.ps1'] 'staged-1.0.0-goalrouter.ps1' 'launcher installed'
     Assert-Equal $fixture.State.Files['D:\Install\bin\goalrouter.cmd'] 'staged-1.0.0-goalrouter.cmd' 'CMD shim installed'
     Assert-Equal $fixture.State.Files['D:\Install\install.json'] $fixture.State.Files['D:\State\install.json'] 'trusted/runtime parity exact'
@@ -877,7 +883,7 @@ Invoke-Contract 'unsafe higher existing destination ancestor fails before native
 
 Invoke-Contract 'staging cleanup failure occurs before install transaction mutation' {
     $fixture = New-FullInstallerFixture
-    $fixture.State.ThrowRemovePath = 'C:\Temp\goalrouter-random-stage'
+    $fixture.State.ThrowRemovePath = 'C:\Users\Me\AppData\Local\goalrouter-random-stage'
     Assert-Throws { Invoke-GoalRouterWindowsInstall -Options (New-FullInstallOptions) -Ports $fixture.Ports } 'injected removal failure' 'staging cleanup failure'
     Assert-Equal $fixture.State.UserPath.Value 'C:\Tools' 'PATH unchanged after staging cleanup failure'
     Assert-True (-not $fixture.State.Files.ContainsKey('D:\Install\install.json')) 'trusted control not committed after staging cleanup failure'
@@ -889,7 +895,7 @@ Invoke-Contract 'staging cleanup failure occurs before install transaction mutat
     $beforeControl = $updateFixture.State.Files['D:\Install\install.json']
     $beforeLauncher = $updateFixture.State.Files['D:\Install\bin\goalrouter.ps1']
     $beforePath = $updateFixture.State.UserPath.Value
-    $updateFixture.State.ThrowRemovePath = 'C:\Temp\goalrouter-random-stage'
+    $updateFixture.State.ThrowRemovePath = 'C:\Users\Me\AppData\Local\goalrouter-random-stage'
     $updateOptions = New-FullInstallOptions
     $updateOptions.Version = '1.0.1'
     $updateOptions.ReleaseBase = 'https://github.com/vparla/GoalRouter/releases/download/v1.0.1'
@@ -1472,17 +1478,45 @@ Invoke-Contract 'directory-chain creation rolls back its own partial failure' {
     Assert-Equal $removed @('/fixture/new') 'partial chain rollback removes created ancestor'
 }
 
-Invoke-Contract 'temporary staging root and created workdir are trusted before download use' {
+Invoke-Contract 'trusted staging base and current-user workdir are validated before download use' {
     $events = [System.Collections.ArrayList]::new()
-    $safeInfo = { param([string]$Path); [pscustomobject]@{ Path = $Path; ProviderName = 'FileSystem'; ProviderPath = $Path; Exists = $true; IsContainer = $true; IsLeaf = $false; IsReparsePoint = $false; ParentIsReparsePoint = $false; OwnerMatchesCurrentUser = $true; OwnerIsTrusted = $true; AclIsSafe = $true; AncestorChainIsSafe = $true } }
-    $resolve = { param([string]$Path, [string]$Kind, [bool]$AllowMissing); & $safeInfo $Path }.GetNewClosure()
-    $created = New-GoalRouterTrustedWorkDirectory -TempRoot 'D:\SafeTemp' -ResolvePathPort $resolve -CreateDirectoryPort { param([string]$Path); [void]$events.Add("create:$Path") } -RemoveDirectoryPort { param([string]$Path); [void]$events.Add("remove:$Path") } -NewNamePort { 'goalrouter-install-fixed' }
-    Assert-Equal $created 'D:\SafeTemp\goalrouter-install-fixed' 'trusted staging path'
-    $foreignOwner = { param([string]$Path); [pscustomobject]@{ Path = $Path; ProviderName = 'FileSystem'; ProviderPath = $Path; Exists = $true; IsContainer = $true; IsLeaf = $false; IsReparsePoint = $false; ParentIsReparsePoint = $false; OwnerMatchesCurrentUser = $false; OwnerIsTrusted = $true; AclIsSafe = $true; AncestorChainIsSafe = $true } }
-    Assert-Throws { New-GoalRouterTrustedWorkDirectory -TempRoot 'D:\ForeignTemp' -ResolvePathPort $foreignOwner -CreateDirectoryPort { throw 'must not create' } -RemoveDirectoryPort { param([string]$Path) } -NewNamePort { 'goalrouter-install-fixed' } } 'owned by the current user' 'trusted non-user staging root is rejected'
-    $unsafeResolve = { param([string]$Path, [string]$Kind, [bool]$AllowMissing); $info = & $safeInfo $Path; $info.ProviderPath = 'D:\Redirected'; $info.IsReparsePoint = $true; return $info }.GetNewClosure()
-    Assert-Throws { New-GoalRouterTrustedWorkDirectory -TempRoot 'D:\UnsafeTemp' -ResolvePathPort $unsafeResolve -CreateDirectoryPort { throw 'must not create' } -RemoveDirectoryPort { param([string]$Path) } -NewNamePort { 'goalrouter-install-fixed' } } 'provider|reparse' 'redirected staging root'
-    Assert-Equal @($events | Where-Object { $_ -like 'create:*' }).Count 1 'unsafe staging root creates nothing'
+    $trustedBase = [pscustomobject]@{ Path = 'D:\SafeBase'; ProviderName = 'FileSystem'; ProviderPath = 'D:\SafeBase'; Exists = $true; IsContainer = $true; IsLeaf = $false; IsReparsePoint = $false; ParentIsReparsePoint = $false; OwnerMatchesCurrentUser = $false; OwnerIsTrusted = $true; AclIsSafe = $true; AncestorChainIsSafe = $true }
+    $currentUserChild = $trustedBase.PSObject.Copy()
+    $currentUserChild.Path = 'D:\SafeBase\goalrouter-install-fixed'
+    $currentUserChild.ProviderPath = $currentUserChild.Path
+    $currentUserChild.OwnerMatchesCurrentUser = $true
+    $resolve = { param([string]$Path, [string]$Kind, [bool]$AllowMissing); if ($Path -ceq 'D:\SafeBase') { return $trustedBase }; return $currentUserChild }.GetNewClosure()
+    $created = New-GoalRouterTrustedWorkDirectory -StagingBase 'D:\SafeBase' -ResolvePathPort $resolve -CreateDirectoryPort { param([string]$Path); [void]$events.Add("create:$Path") } -RemoveDirectoryPort { param([string]$Path); [void]$events.Add("remove:$Path") } -NewNamePort { 'goalrouter-install-fixed' }
+    Assert-Equal $created 'D:\SafeBase\goalrouter-install-fixed' 'trusted staging path'
+
+    $untrustedBase = $trustedBase.PSObject.Copy()
+    $untrustedBase.Path = 'D:\UntrustedBase'
+    $untrustedBase.ProviderPath = $untrustedBase.Path
+    $untrustedBase.OwnerIsTrusted = $false
+    $untrustedCreateCount = 0
+    $untrustedResolve = { param([string]$Path, [string]$Kind, [bool]$AllowMissing); return $untrustedBase }.GetNewClosure()
+    $untrustedCreate = { param([string]$Path); $untrustedCreateCount++ }.GetNewClosure()
+    Assert-Throws { New-GoalRouterTrustedWorkDirectory -StagingBase 'D:\UntrustedBase' -ResolvePathPort $untrustedResolve -CreateDirectoryPort $untrustedCreate -RemoveDirectoryPort { param([string]$Path) } -NewNamePort { 'goalrouter-install-fixed' } } 'trusted principal' 'untrusted staging base is rejected'
+    Assert-Equal $untrustedCreateCount 0 'untrusted staging base fails before creation'
+
+    $foreignChild = $currentUserChild.PSObject.Copy()
+    $foreignChild.OwnerMatchesCurrentUser = $false
+    $foreignChildResolve = { param([string]$Path, [string]$Kind, [bool]$AllowMissing); if ($Path -ceq 'D:\SafeBase') { return $trustedBase }; $foreignChild.Path = $Path; $foreignChild.ProviderPath = $Path; return $foreignChild }.GetNewClosure()
+    Assert-Throws { New-GoalRouterTrustedWorkDirectory -StagingBase 'D:\SafeBase' -ResolvePathPort $foreignChildResolve -CreateDirectoryPort { param([string]$Path); [void]$events.Add("create:$Path") } -RemoveDirectoryPort { param([string]$Path); [void]$events.Add("remove:$Path") } -NewNamePort { 'goalrouter-install-foreign' } } 'owned by the current user' 'foreign created staging child is rejected'
+    Assert-True ($events -contains 'remove:D:\SafeBase\goalrouter-install-foreign') 'foreign created child is removed'
+
+    $unsafeAcl = $trustedBase.PSObject.Copy()
+    $unsafeAcl.Path = 'D:\UnsafeAclBase'; $unsafeAcl.ProviderPath = $unsafeAcl.Path; $unsafeAcl.AclIsSafe = $false
+    $unsafeAclResolve = { param([string]$Path, [string]$Kind, [bool]$AllowMissing); return $unsafeAcl }.GetNewClosure()
+    Assert-Throws { New-GoalRouterTrustedWorkDirectory -StagingBase 'D:\UnsafeAclBase' -ResolvePathPort $unsafeAclResolve -CreateDirectoryPort { throw 'must not create' } -RemoveDirectoryPort { param([string]$Path) } -NewNamePort { 'goalrouter-install-fixed' } } 'ACL' 'unsafe staging-base ACL'
+    $redirected = $trustedBase.PSObject.Copy()
+    $redirected.Path = 'D:\UnsafeReparseBase'; $redirected.ProviderPath = 'D:\Redirected'; $redirected.IsReparsePoint = $true
+    $redirectedResolve = { param([string]$Path, [string]$Kind, [bool]$AllowMissing); return $redirected }.GetNewClosure()
+    Assert-Throws { New-GoalRouterTrustedWorkDirectory -StagingBase 'D:\UnsafeReparseBase' -ResolvePathPort $redirectedResolve -CreateDirectoryPort { throw 'must not create' } -RemoveDirectoryPort { param([string]$Path) } -NewNamePort { 'goalrouter-install-fixed' } } 'provider|reparse' 'redirected staging base'
+
+    $source = [IO.File]::ReadAllText($installer)
+    $productionStagingBlock = $source.Substring($source.IndexOf('$newWorkDirectory = {'), $source.IndexOf('$readText = {') - $source.IndexOf('$newWorkDirectory = {'))
+    Assert-True (-not $productionStagingBlock.Contains('GetTempPath')) 'production staging port never reads TEMP'
 }
 
 Invoke-Contract 'recovery journal is one atomic checksummed record and self-removal is the last fallible action' {

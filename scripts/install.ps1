@@ -785,9 +785,10 @@ namespace GoalRouter {
         return [pscustomobject]@{ Path = $Path; ProviderName = $resolved[0].Provider.Name; ProviderPath = $providerPath; AncestorProviderPath = $ancestorProviderPath; Exists = $exists; IsContainer = $exists -and (Test-Path -LiteralPath $providerPath -PathType Container); IsLeaf = $exists -and (Test-Path -LiteralPath $providerPath -PathType Leaf); IsReparsePoint = (($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0); ParentIsReparsePoint = $parentReparse; OwnerMatchesCurrentUser = [bool]$pathSecurity.OwnerMatchesCurrentUser; OwnerIsTrusted = [bool]$pathSecurity.OwnerIsTrusted; AclIsSafe = [bool]$pathSecurity.AclIsSafe; AncestorOwnerMatchesCurrentUser = [bool]$pathSecurity.OwnerMatchesCurrentUser; AncestorAclIsSafe = [bool]$pathSecurity.AclIsSafe; AncestorChainIsSafe = $ancestorChainIsSafe }
     }
     $newWorkDirectory = {
+        param([Parameter(Mandatory = $true)][string]$StagingBase)
         $createWorkDirectory = { param([string]$Path); if (Test-Path -LiteralPath $Path) { throw 'temporary staging directory collision' }; [void][IO.Directory]::CreateDirectory($Path) }
         $removeWorkDirectory = { param([string]$Path); if (Test-Path -LiteralPath $Path) { [IO.Directory]::Delete($Path, $false) } }
-        return New-GoalRouterTrustedWorkDirectory -TempRoot ([IO.Path]::GetTempPath().TrimEnd('\', '/')) -ResolvePathPort $resolvePath -CreateDirectoryPort $createWorkDirectory -RemoveDirectoryPort $removeWorkDirectory
+        return New-GoalRouterTrustedWorkDirectory -StagingBase $StagingBase -ResolvePathPort $resolvePath -CreateDirectoryPort $createWorkDirectory -RemoveDirectoryPort $removeWorkDirectory
     }.GetNewClosure()
     $readText = { param([string]$Path); return ConvertFrom-GoalRouterStrictUtf8Bytes -Bytes ([IO.File]::ReadAllBytes($Path)) -Label 'lifecycle text file' }
     $writeText = { param([string]$Path, [string]$Content); [IO.File]::WriteAllText($Path, $Content, [Text.UTF8Encoding]::new($false)) }
@@ -1043,16 +1044,16 @@ function Assert-GoalRouterHostRoot {
 
 function New-GoalRouterTrustedWorkDirectory {
     param(
-        [Parameter(Mandatory = $true)][string]$TempRoot,
+        [Parameter(Mandatory = $true)][string]$StagingBase,
         [Parameter(Mandatory = $true)][scriptblock]$ResolvePathPort,
         [Parameter(Mandatory = $true)][scriptblock]$CreateDirectoryPort,
         [Parameter(Mandatory = $true)][scriptblock]$RemoveDirectoryPort,
         [scriptblock]$NewNamePort
     )
     if ($null -eq $NewNamePort) { $NewNamePort = { 'goalrouter-install-' + [guid]::NewGuid().ToString('N') } }
-    $rootInfo = & $ResolvePathPort -Path $TempRoot -Kind 'Directory' -AllowMissing $false
-    Assert-GoalRouterLifecyclePathInfo -Info $rootInfo -Label 'temporary staging root' -AllowMissing $false -ProtectedRoots @() -RequiredKind 'Directory'
-    $path = Join-GoalRouterWindowsPath $TempRoot (& $NewNamePort)
+    $rootInfo = & $ResolvePathPort -Path $StagingBase -Kind 'Directory' -AllowMissing $false
+    Assert-GoalRouterLifecyclePathInfo -Info $rootInfo -Label 'staging base' -AllowMissing $false -ProtectedRoots @() -RequiredKind 'Directory' -RequiredOwner 'TrustedPrincipal'
+    $path = Join-GoalRouterWindowsPath $StagingBase (& $NewNamePort)
     try {
         & $CreateDirectoryPort -Path $path
         $workInfo = & $ResolvePathPort -Path $path -Kind 'Directory' -AllowMissing $false
@@ -1250,7 +1251,7 @@ function Invoke-GoalRouterWindowsInstall {
 
     $releaseBaseValue = if ([string]::IsNullOrEmpty($Options.ReleaseBase)) { "https://github.com/vparla/GoalRouter/releases/download/v$($Options.Version)" } else { [string]$Options.ReleaseBase }
     [void](Assert-GoalRouterReleaseUri -Uri $releaseBaseValue -AllowLoopbackHttp ([bool]$Options.AllowLoopbackHttp))
-    $workDirectory = & $newWorkPort
+    $workDirectory = & $newWorkPort -StagingBase ([string]$hostInfo.LocalAppData)
     try {
         $checksumsPath = Join-GoalRouterWindowsPath $workDirectory 'SHA256SUMS'
         $releaseManifestPath = Join-GoalRouterWindowsPath $workDirectory $script:GoalRouterReleaseManifestName
