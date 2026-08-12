@@ -5,7 +5,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidatePattern('^(?:latest|[0-9]+\.[0-9]+\.[0-9]+)$')][string]$Version = '1.0.4',
+    [ValidatePattern('^(?:latest|[0-9]+\.[0-9]+\.[0-9]+)$')][string]$Version = '1.0.5',
     [string]$InstallRoot,
     [string]$BinDir,
     [string]$ConfigFile,

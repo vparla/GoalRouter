@@ -43,7 +43,7 @@ docker build \
     --quiet \
     --pull=false \
     --target runtime \
-    --build-arg VERSION=1.0.4 \
+    --build-arg VERSION=1.0.5 \
     --build-arg REVISION=runtime-smoke \
     --build-arg CREATED=1970-01-01T00:00:00Z \
     --label "$owner_label" \
@@ -160,7 +160,7 @@ version_output=$(docker run --rm \
     --volume "$auth_volume:/codex-auth:ro" \
     --volume "$state_volume:/state:rw" \
     "$image" --json version)
-assert_contains "$version_output" '"version": "1.0.4"'
+assert_contains "$version_output" '"version": "1.0.5"'
 assert_contains "$version_output" '"image_revision": "runtime-smoke"'
 
 template_output=$(docker run --rm \
@@ -204,7 +204,7 @@ docker run --rm \
         /tmp/executable-probe
         grep " /tmp " /proc/mounts | grep -q nosuid
         /usr/local/bin/goalrouter-container-entrypoint --json version >/tmp/version.json
-        grep -Fq "\"version\": \"1.0.4\"" /tmp/version.json
+        grep -Fq "\"version\": \"1.0.5\"" /tmp/version.json
     '
 
 docker run --rm \
