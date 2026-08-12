@@ -40,7 +40,7 @@ DOC_NAMES = (
 )
 CANONICAL_REPOSITORY = "vparla/GoalRouter"
 CANONICAL_IMAGE = "ghcr.io/vparla/goalrouter"
-CURRENT_VERSION = "1.0.7"
+CURRENT_VERSION = "1.0.8"
 CONTRIBUTOR_DOCUMENTS = (
     "CONTRIBUTING.md",
     "docs/development.md",
@@ -513,6 +513,7 @@ def test_authentication_security_lifecycle_and_release_contracts_are_documented(
     assert "1.x" in security
 
     changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert "## [1.0.8] - 2026-08-12" in changelog
     assert "## [1.0.7] - 2026-08-12" in changelog
     assert "## [1.0.6] - 2026-08-12" in changelog
     assert "## [1.0.5] - 2026-08-12" in changelog

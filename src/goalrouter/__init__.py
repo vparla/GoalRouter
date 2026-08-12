@@ -4,4 +4,4 @@
 
 """Task-driven model routing for local Codex engineering workflows."""
 
-__version__ = "1.0.7"
+__version__ = "1.0.8"
