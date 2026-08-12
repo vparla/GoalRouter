@@ -26,6 +26,13 @@ All notable changes to GoalRouter are recorded here.
   evidence. A command-scoped exact-worktree safe-directory exception supports read-only Docker
   mounts without wildcard trust.
 
+## [1.0.4] - 2026-08-12
+
+### Fixed
+
+- Parse Docker image labels as strict quote-free JSON on Windows PowerShell 5.1 before
+  accepting the exact image metadata value.
+
 ## [1.0.3] - 2026-08-12
 
 ### Fixed

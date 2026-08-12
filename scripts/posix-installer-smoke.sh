@@ -119,7 +119,7 @@ docker build \
     --quiet \
     --pull=false \
     --target runtime \
-    --build-arg VERSION=1.0.3 \
+    --build-arg VERSION=1.0.4 \
     --build-arg REVISION=posix-installer-smoke \
     --build-arg CREATED=1970-01-01T00:00:00Z \
     --label "$owner_label" \
@@ -155,9 +155,9 @@ docker container create \
         cp /workspace/install.sh /tmp/release-asset/install.sh
         cp /workspace/uninstall.sh /tmp/release-asset/uninstall.sh
         chmod 0755 /tmp/release-asset/goalrouter /tmp/release-asset/install.sh /tmp/release-asset/uninstall.sh
-        tar -czf /release/goalrouter-1.0.3-unix.tar.gz -C /tmp/release-asset goalrouter install.sh uninstall.sh
+        tar -czf /release/goalrouter-1.0.4-unix.tar.gz -C /tmp/release-asset goalrouter install.sh uninstall.sh
         cd /release
-        sha256sum goalrouter-1.0.3-unix.tar.gz >SHA256SUMS
+        sha256sum goalrouter-1.0.4-unix.tar.gz >SHA256SUMS
         chown -R 24680:24681 /release /smoke-home
         chmod 0700 /smoke-home
     ' >/dev/null
@@ -185,7 +185,7 @@ case $registry_binding in
     127.0.0.1:*) registry_port=${registry_binding##*:} ;;
     *) fail 'ephemeral registry did not bind exact loopback' ;;
 esac
-registry_reference=127.0.0.1:$registry_port/goalrouter:1.0.3
+registry_reference=127.0.0.1:$registry_port/goalrouter:1.0.4
 docker image tag "$runtime_image" "$registry_reference"
 docker image push "$registry_reference" >/dev/null
 registry_repo_digest=$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$registry_reference" \
@@ -198,9 +198,9 @@ docker run --rm \
     --volume "$release_volume:/release:rw" \
     --entrypoint /bin/sh \
     goalrouter-installer-smoke:local -eu -c '
-        printf '\''{"version":"1.0.3","protocol_version":1,"image":"%s","image_digest":"%s","architectures":["linux/amd64","linux/arm64"],"source_revision":"posix-installer-smoke","minimum_hosts":{"windows":"10.0.19045","powershell":"5.1","wsl":"2.2.3","docker":"20.10"}}\n'\'' "$1" "$2" >/release/release-manifest.json
+        printf '\''{"version":"1.0.4","protocol_version":1,"image":"%s","image_digest":"%s","architectures":["linux/amd64","linux/arm64"],"source_revision":"posix-installer-smoke","minimum_hosts":{"windows":"10.0.19045","powershell":"5.1","wsl":"2.2.3","docker":"20.10"}}\n'\'' "$1" "$2" >/release/release-manifest.json
         cd /release
-        sha256sum release-manifest.json goalrouter-1.0.3-unix.tar.gz >SHA256SUMS
+        sha256sum release-manifest.json goalrouter-1.0.4-unix.tar.gz >SHA256SUMS
         chown 24680:24681 release-manifest.json SHA256SUMS
     ' sh "$registry_reference" "$registry_repo_digest"
 
@@ -260,7 +260,7 @@ set -eu
         mkdir -p "$HOME/.tmp"
         export TMPDIR="$HOME/.tmp"
         /bin/sh /tmp/install.sh \
-            --version 1.0.3 \
+            --version 1.0.4 \
             --release-base http://127.0.0.1:18080 \
             --allow-loopback-http \
             --image "$REGISTRY_REFERENCE" \
@@ -269,7 +269,7 @@ set -eu
             --no-path-hint \
             --skip-doctor
         "$HOME/.local/bin/goalrouter" version >/tmp/installed-version
-        grep -Fxq launcher_version=1.0.3 /tmp/installed-version
+        grep -Fxq launcher_version=1.0.4 /tmp/installed-version
         grep -Eq "^image_digest=sha256:[0-9a-f]{64}$" /tmp/installed-version
         if [ "$LIVE_INVENTORY" -eq 1 ]; then
             [ "${OPENAI_API_KEY+x}" != x ]
@@ -291,7 +291,7 @@ set -eu
         config_before=$(sha256sum "$HOME/.config/goalrouter/task-models.yaml")
         state_before=$(sha256sum "$HOME/.local/state/goalrouter/runs/preserve")
         "$HOME/.local/bin/goalrouter-install" \
-            --version 1.0.3 \
+            --version 1.0.4 \
             --release-base http://127.0.0.1:18080 \
             --allow-loopback-http \
             --image "$REGISTRY_REFERENCE" \
@@ -303,7 +303,7 @@ set -eu
         test "$config_after" = "$config_before"
         test "$state_after" = "$state_before"
         "$HOME/.local/bin/goalrouter" version >/tmp/updated-version
-        grep -Fxq launcher_version=1.0.3 /tmp/updated-version
+        grep -Fxq launcher_version=1.0.4 /tmp/updated-version
         "$HOME/.local/bin/goalrouter" doctor --skip-account
         "$HOME/.local/bin/goalrouter" uninstall --yes
         test ! -e "$HOME/.local/bin/goalrouter"

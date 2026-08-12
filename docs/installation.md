@@ -4,7 +4,7 @@
 
 # Installation
 
-GoalRouter 1.0.3 installs a small native launcher and keeps the Python application inside
+GoalRouter 1.0.4 installs a small native launcher and keeps the Python application inside
 the immutable `ghcr.io/vparla/goalrouter` runtime image. The installer is per-user and
 requires a working Docker daemon plus a local Codex sign-in for its default doctor check.
 The default `existing-session` mode reuses a Codex home populated by ChatGPT or workspace
@@ -12,7 +12,7 @@ SSO sign-in and does not require an API key on Windows, Linux, or macOS.
 
 ## Host requirements
 
-The release manifest enforces supported architecture and minimum versions. Version 1.0.3
+The release manifest enforces supported architecture and minimum versions. Version 1.0.4
 declares `linux/amd64` and `linux/arm64`; Windows requires build 10.0.19045, Windows
 PowerShell 5.1, WSL 2.2.3 with the selected WSL2 distribution, and Docker client and daemon
 20.10. POSIX installation requires a supported Linux or macOS shell environment, Docker,
@@ -23,7 +23,7 @@ PowerShell 5.1, WSL 2.2.3 with the selected WSL2 distribution, and Docker client
 Use Windows PowerShell. The canonical installer defaults to the Ubuntu WSL distribution.
 
 ```powershell
-$Version = '1.0.3'
+$Version = '1.0.4'
 $Release = "https://github.com/vparla/GoalRouter/releases/download/v$Version"
 Invoke-WebRequest "$Release/SHA256SUMS" -OutFile .\SHA256SUMS
 Invoke-WebRequest "$Release/install.ps1" -OutFile .\install.ps1
@@ -58,7 +58,7 @@ is mandatory, including for the default command above.
 Use this complete block on Linux with `sha256sum`:
 
 ```sh
-version=1.0.3
+version=1.0.4
 release="https://github.com/vparla/GoalRouter/releases/download/v$version"
 curl --fail-with-body --location --proto '=https' --tlsv1.2 "$release/SHA256SUMS" -o SHA256SUMS
 curl --fail-with-body --location --proto '=https' --tlsv1.2 "$release/install.sh" -o install.sh
@@ -70,7 +70,7 @@ grep " goalrouter-$version-unix.tar.gz$" SHA256SUMS > archive.SHA256SUMS
 sha256sum -c archive.SHA256SUMS
 tar -tzf "goalrouter-$version-unix.tar.gz"
 chmod 0700 install.sh
-./install.sh --version 1.0.3 --yes
+./install.sh --version 1.0.4 --yes
 ```
 
 ## macOS: inspect, download, verify, install
@@ -78,7 +78,7 @@ chmod 0700 install.sh
 Use this complete block on macOS with `shasum`:
 
 ```sh
-version=1.0.3
+version=1.0.4
 release="https://github.com/vparla/GoalRouter/releases/download/v$version"
 curl --fail-with-body --location --proto '=https' --tlsv1.2 "$release/SHA256SUMS" -o SHA256SUMS
 curl --fail-with-body --location --proto '=https' --tlsv1.2 "$release/install.sh" -o install.sh
@@ -90,7 +90,7 @@ grep " goalrouter-$version-unix.tar.gz$" SHA256SUMS > archive.SHA256SUMS
 shasum -a 256 -c archive.SHA256SUMS
 tar -tzf "goalrouter-$version-unix.tar.gz"
 chmod 0700 install.sh
-./install.sh --version 1.0.3 --yes
+./install.sh --version 1.0.4 --yes
 ```
 
 The POSIX defaults follow XDG locations:
