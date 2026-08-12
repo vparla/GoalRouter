@@ -26,6 +26,14 @@ All notable changes to GoalRouter are recorded here.
   evidence. A command-scoped exact-worktree safe-directory exception supports read-only Docker
   mounts without wildcard trust.
 
+## [1.0.2] - 2026-08-12
+
+### Fixed
+
+- Stage Windows downloads under the validated LocalAppData root while retaining a
+  current-user-owned private work directory and the complete ACL, ancestor, and reparse-point
+  safety checks.
+
 ## [1.0.1] - 2026-08-12
 
 ### Fixed
