@@ -1737,6 +1737,87 @@ Invoke-Contract 'SkipAccount still validates existing-session auth source and sk
     } finally { Remove-Item -LiteralPath $authRoot -Recurse -ErrorAction Stop }
 }
 
+Invoke-Contract 'Codex session boundary accepts unrelated descendant reparses and missing optional files' {
+    $priorNativeInvoker = $script:GoalRouterNativeInvoker
+    $calls = [System.Collections.ArrayList]::new()
+    $script:GoalRouterNativeInvoker = {
+        param([string]$FilePath, [string[]]$Arguments, [bool]$CaptureOutput)
+        [void]$calls.Add(($Arguments -join ' '))
+        return [pscustomobject]@{ ExitCode = 0; Output = @() }
+    }.GetNewClosure()
+    $fixtureRoot = Join-Path ([IO.Path]::GetTempPath()) ('goalrouter-codex-boundary-' + [guid]::NewGuid().ToString('N'))
+    $authRoot = Join-Path $fixtureRoot 'codex'
+    $cacheTarget = Join-Path $fixtureRoot 'cache-target'
+    [void][IO.Directory]::CreateDirectory((Join-Path $authRoot 'plugins/cache'))
+    [void][IO.Directory]::CreateDirectory($cacheTarget)
+    try {
+        [IO.File]::WriteAllText((Join-Path $authRoot 'auth.json'), '{}', [Text.UTF8Encoding]::new($false))
+        [void](New-Item -ItemType SymbolicLink -Path (Join-Path $authRoot 'plugins/cache/unrelated') -Target $cacheTarget -ErrorAction Stop)
+        $context = [pscustomobject]@{ Distribution = 'Ubuntu'; Image = 'registry/router@sha256:' + ('a' * 64); Config = '/config'; State = '/state'; Project = '/project'; CodexHome = '/codex'; CodexWindows = $authRoot; AuthMode = 'existing-session'; Access = 'readonly'; Json = $false; Forwarded = @() }
+        Assert-Equal (Invoke-GoalRouterInstalledDoctor -Context $context -SkipAccount $true) 0 'unrelated descendant reparse and absent optional session files'
+        Assert-True ((@($calls) -join "`n") -notmatch '(?:^| )models(?: |$)') 'SkipAccount still omits inventory'
+    } finally {
+        $script:GoalRouterNativeInvoker = $priorNativeInvoker
+        Remove-Item -LiteralPath $fixtureRoot -Recurse -ErrorAction Stop
+    }
+}
+
+Invoke-Contract 'Codex session boundary rejects root and session-file reparses while strict directories stay recursive' {
+    $fixtureRoot = Join-Path ([IO.Path]::GetTempPath()) ('goalrouter-codex-reparse-' + [guid]::NewGuid().ToString('N'))
+    $authRoot = Join-Path $fixtureRoot 'codex'
+    $rootLink = Join-Path $fixtureRoot 'codex-link'
+    $targetDirectory = Join-Path $fixtureRoot 'target-directory'
+    $targetFile = Join-Path $fixtureRoot 'target-file'
+    [void][IO.Directory]::CreateDirectory((Join-Path $authRoot 'plugins'))
+    [void][IO.Directory]::CreateDirectory($targetDirectory)
+    [IO.File]::WriteAllText($targetFile, '{}', [Text.UTF8Encoding]::new($false))
+    try {
+        [void](New-Item -ItemType SymbolicLink -Path $rootLink -Target $authRoot -ErrorAction Stop)
+        Assert-Throws { Assert-GoalRouterTrustedCodexSessionDirectory -Path $rootLink -Label 'Codex home' } 'exact FileSystem directory|reparse point' 'Codex-home root reparse'
+        foreach ($name in @('auth.json', 'config.toml', 'models_cache.json')) {
+            $sessionPath = Join-Path $authRoot $name
+            [void](New-Item -ItemType SymbolicLink -Path $sessionPath -Target $targetFile -ErrorAction Stop)
+            Assert-Throws { Assert-GoalRouterTrustedCodexSessionDirectory -Path $authRoot -Label 'Codex home' } 'exact FileSystem leaf|reparse point' "$name reparse"
+            Remove-Item -LiteralPath $sessionPath -ErrorAction Stop
+        }
+        [void](New-Item -ItemType SymbolicLink -Path (Join-Path $authRoot 'config.toml') -Target (Join-Path $fixtureRoot 'missing-target') -ErrorAction Stop)
+        Assert-True (Test-GoalRouterCodexSessionFileEntry -Directory $authRoot -Name 'config.toml') 'dangling named session reparse is lexically present'
+        Assert-True (-not (Test-GoalRouterCodexSessionFileEntry -Directory $authRoot -Name 'models_cache.json')) 'missing optional session file is lexically absent'
+        Assert-Throws { Assert-GoalRouterTrustedCodexSessionDirectory -Path $authRoot -Label 'Codex home' } 'exact FileSystem leaf|reparse point' 'dangling optional session reparse'
+        Remove-Item -LiteralPath (Join-Path $authRoot 'config.toml') -ErrorAction Stop
+        [IO.File]::WriteAllText((Join-Path $authRoot 'auth.json'), '{}', [Text.UTF8Encoding]::new($false))
+        [void](New-Item -ItemType SymbolicLink -Path (Join-Path $authRoot 'plugins/unrelated') -Target $targetDirectory -ErrorAction Stop)
+        Assert-Equal (Assert-GoalRouterTrustedCodexSessionDirectory -Path $authRoot -Label 'Codex home') $authRoot 'physical Codex home with safe auth and missing optional files'
+        Assert-Throws { Assert-GoalRouterTrustedPhysicalDirectory -Path $authRoot -Label 'installer-owned directory' } 'recursive reparse' 'strict installer-owned recursive reparse rejection'
+    } finally { Remove-Item -LiteralPath $fixtureRoot -Recurse -ErrorAction Stop }
+}
+
+Invoke-Contract 'installed version validates the same Codex session-file boundary before runtime invocation' {
+    $priorNativeInvoker = $script:GoalRouterNativeInvoker
+    $calls = [System.Collections.ArrayList]::new()
+    $script:GoalRouterNativeInvoker = {
+        param([string]$FilePath, [string[]]$Arguments, [bool]$CaptureOutput)
+        [void]$calls.Add(($Arguments -join ' '))
+        return [pscustomobject]@{ ExitCode = 0; Output = @('{"version":"1.0.0","protocol_version":1}') }
+    }.GetNewClosure()
+    $fixtureRoot = Join-Path ([IO.Path]::GetTempPath()) ('goalrouter-version-session-' + [guid]::NewGuid().ToString('N'))
+    $authRoot = Join-Path $fixtureRoot 'codex'
+    $targetFile = Join-Path $fixtureRoot 'target-file'
+    [void][IO.Directory]::CreateDirectory($authRoot)
+    [IO.File]::WriteAllText((Join-Path $authRoot 'auth.json'), '{}', [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText($targetFile, 'unsafe fixture', [Text.UTF8Encoding]::new($false))
+    try {
+        [void](New-Item -ItemType SymbolicLink -Path (Join-Path $authRoot 'config.toml') -Target $targetFile -ErrorAction Stop)
+        $context = [pscustomobject]@{ Distribution = 'Ubuntu'; Image = 'registry/router@sha256:' + ('a' * 64); Config = '/config'; State = '/state'; Project = '/project'; CodexHome = '/codex'; CodexWindows = $authRoot; AuthMode = 'existing-session'; Access = 'readonly'; Json = $false; Forwarded = @() }
+        $manifest = [pscustomobject]@{ version = '1.0.0'; protocol_version = 1; launcher_version = '1.0.0'; image_reference = 'registry/router'; image_digest = 'sha256:' + ('a' * 64); source_revision = 'fixture'; image_platform = 'linux/amd64'; wsl_distribution = 'Ubuntu' }
+        Assert-Throws { Invoke-GoalRouterInstalledVersion -Context $context -Manifest $manifest -AsJson $true } 'exact FileSystem leaf|reparse point' 'version unsafe optional session file'
+        Assert-Equal $calls.Count 0 'version validates Codex session files before native runtime invocation'
+    } finally {
+        $script:GoalRouterNativeInvoker = $priorNativeInvoker
+        Remove-Item -LiteralPath $fixtureRoot -Recurse -ErrorAction Stop
+    }
+}
+
 Invoke-Contract 'production rollback snapshot preserves bytes attributes and Windows security descriptor' {
     $source = [IO.File]::ReadAllText($installer)
     foreach ($required in @('ReadAllBytes', 'WriteAllBytes', 'GetSecurityDescriptorSddlForm', 'SetSecurityDescriptorSddlForm', 'SetAttributes')) { Assert-True $source.Contains($required) "rollback metadata primitive $required" }

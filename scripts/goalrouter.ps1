@@ -497,6 +497,33 @@ function Assert-GoalRouterTrustedPhysicalDirectory {
     return [string]$resolved[0].ProviderPath
 }
 
+function Test-GoalRouterCodexSessionFileEntry {
+    param(
+        [Parameter(Mandatory = $true)][string]$Directory,
+        [Parameter(Mandatory = $true)][ValidateSet('auth.json', 'config.toml', 'models_cache.json')][string]$Name
+    )
+    $expectedPath = Join-Path $Directory $Name
+    foreach ($entry in [IO.Directory]::EnumerateFileSystemEntries($Directory, $Name, [IO.SearchOption]::TopDirectoryOnly)) {
+        if (Test-GoalRouterWindowsPathEquivalent -First ([string]$entry) -Second $expectedPath) { return $true }
+    }
+    return $false
+}
+
+function Assert-GoalRouterTrustedCodexSessionDirectory {
+    param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][string]$Label)
+    $resolved = @(Resolve-Path -LiteralPath $Path -ErrorAction Stop)
+    if ($resolved.Count -ne 1 -or [string]$resolved[0].Provider.Name -cne 'FileSystem' -or -not (Test-GoalRouterWindowsPathEquivalent -First ([string]$resolved[0].ProviderPath) -Second $Path) -or -not (Test-Path -LiteralPath $Path -PathType Container)) { throw "$Label is not an exact FileSystem directory" }
+    if (([IO.File]::GetAttributes($Path) -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "$Label is a reparse point" }
+    $physicalPath = [string]$resolved[0].ProviderPath
+    & $script:GoalRouterPhysicalPathSecurityVerifier -Path $physicalPath
+    Assert-GoalRouterTrustedPhysicalAncestorChain -Path (Split-Path -Parent $physicalPath) -Label $Label
+    foreach ($name in @('auth.json', 'config.toml', 'models_cache.json')) {
+        $sessionFile = Join-Path $physicalPath $name
+        if (Test-GoalRouterCodexSessionFileEntry -Directory $physicalPath -Name $name) { [void](Assert-GoalRouterTrustedPhysicalLeaf -Path $sessionFile -Label "$Label $name") }
+    }
+    return $physicalPath
+}
+
 function Assert-GoalRouterInstalledManifestSchema {
     param([Parameter(Mandatory = $true)]$Manifest, [AllowNull()][string]$TrustedJson = $null)
     foreach ($schema in @(
@@ -703,10 +730,9 @@ function Invoke-GoalRouterInstalledDoctor {
     $doctorAction = {
     if ($Context.AuthMode -ceq 'existing-session') {
         if (-not ($Context.PSObject.Properties.Name -contains 'CodexWindows')) { throw 'doctor: existing-session authentication source is unavailable' }
-        [void](Assert-GoalRouterTrustedPhysicalDirectory -Path ([string]$Context.CodexWindows) -Label 'doctor existing-session Codex home')
+        [void](Assert-GoalRouterTrustedCodexSessionDirectory -Path ([string]$Context.CodexWindows) -Label 'doctor existing-session Codex home')
         $authFile = Join-Path ([string]$Context.CodexWindows) 'auth.json'
         if (-not (Test-Path -LiteralPath $authFile -PathType Leaf)) { throw 'doctor: existing-session authentication source is unavailable or unsafe' }
-        [void](Assert-GoalRouterTrustedPhysicalLeaf -Path $authFile -Label 'doctor existing-session auth source')
     }
     $prefix = @('-d', [string]$Context.Distribution, '--', 'docker')
     foreach ($probe in @(
@@ -758,7 +784,7 @@ function Invoke-GoalRouterInstalledVersion {
     param([Parameter(Mandatory = $true)]$Context, [Parameter(Mandatory = $true)]$Manifest, [bool]$AsJson)
     if ($Context.AuthMode -ceq 'existing-session') {
         if (-not ($Context.PSObject.Properties.Name -contains 'CodexWindows')) { throw 'version existing-session Codex home is unavailable' }
-        [void](Assert-GoalRouterTrustedPhysicalDirectory -Path ([string]$Context.CodexWindows) -Label 'version existing-session Codex home')
+        [void](Assert-GoalRouterTrustedCodexSessionDirectory -Path ([string]$Context.CodexWindows) -Label 'version existing-session Codex home')
     }
     $versionAction = {
     $Context.Json = $true
