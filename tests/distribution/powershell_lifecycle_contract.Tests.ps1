@@ -1651,9 +1651,32 @@ Invoke-Contract 'recovery journal is one atomic checksummed record and self-remo
     $installerSource = [IO.File]::ReadAllText($installer)
     $replaceStart = $installerSource.IndexOf('$replace = {')
     $replaceBlock = $installerSource.Substring($replaceStart, $installerSource.IndexOf('$restore = {') - $replaceStart)
-    Assert-True $replaceBlock.Contains('[IO.File]::Replace($temporary, $Path, $null, $true)') 'existing journal targets use same-volume atomic replacement without orphan backup'
+    Assert-True (-not $replaceBlock.Contains('[IO.File]::Replace($temporary, $Path, $null, $true)')) 'existing journal targets bypass the PowerShell static binder for a null backup'
+    Assert-True $replaceBlock.Contains("[IO.File].GetMethod('Replace', [Type[]]@([string], [string], [string], [bool]))") 'replacement resolves the exact four-argument File.Replace overload'
+    Assert-True $replaceBlock.Contains("if (`$null -eq `$replaceMethod) { throw 'required System.IO.File.Replace overload is unavailable' }") 'missing exact replacement overload fails explicitly'
+    Assert-True $replaceBlock.Contains("New-Object 'object[]' 4") 'replacement arguments use a PowerShell 5.1-compatible raw four-element object array'
+    Assert-True $replaceBlock.Contains('$replaceArguments[0] = $temporary') 'replacement source is the same-parent temporary file'
+    Assert-True $replaceBlock.Contains('$replaceArguments[1] = $Path') 'replacement destination is the owned path'
+    Assert-True $replaceBlock.Contains('$replaceArguments[2] = $null') 'replacement carries a true null backup argument'
+    Assert-True $replaceBlock.Contains('$replaceArguments[3] = $true') 'replacement ignores metadata errors through the exact overload'
+    Assert-True $replaceBlock.Contains('$replaceMethod.Invoke($null, $replaceArguments)') 'replacement invokes the resolved overload through reflection'
     Assert-True (-not $replaceBlock.Contains('Move-Item -LiteralPath $Path -Destination $backup')) 'existing target is never moved away before replacement'
     Assert-True (-not $replaceBlock.Contains("'.bak'")) 'atomic replacement creates no untracked backup residue'
+    Assert-True $replaceBlock.Contains('if (Test-Path -LiteralPath $temporary -PathType Leaf) { Remove-Item -LiteralPath $temporary -ErrorAction Stop }') 'failed replacement removes its same-parent temporary file'
+    Assert-True $replaceBlock.Contains('throw $failure') 'replacement failure remains unchanged after cleanup'
+}
+
+Invoke-Contract 'runtime exposes the exact atomic replacement overload and raw null argument shape' {
+    $replaceMethod = [IO.File].GetMethod('Replace', [Type[]]@([string], [string], [string], [bool]))
+    Assert-True ($null -ne $replaceMethod) 'exact four-argument File.Replace overload exists'
+    Assert-Equal @($replaceMethod.GetParameters() | ForEach-Object { $_.ParameterType }) @([string], [string], [string], [bool]) 'exact File.Replace parameter types'
+    $replaceArguments = New-Object 'object[]' 4
+    $replaceArguments[0] = 'source.tmp'
+    $replaceArguments[1] = 'destination.json'
+    $replaceArguments[2] = $null
+    $replaceArguments[3] = $true
+    Assert-Equal $replaceArguments.Count 4 'raw replacement argument count'
+    Assert-True ($null -eq $replaceArguments[2]) 'raw replacement backup remains true null'
 }
 
 Invoke-Contract 'public bounded final cleanup retries only canonical lifecycle residuals' {

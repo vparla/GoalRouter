@@ -884,7 +884,14 @@ namespace GoalRouter {
         try {
             if (Test-Path -LiteralPath $Path) {
                 if (-not $hadTarget -or (([IO.File]::GetAttributes($Path) -band [IO.FileAttributes]::ReparsePoint) -ne 0)) { throw "owned replacement target is unsafe: $Path" }
-                [IO.File]::Replace($temporary, $Path, $null, $true)
+                $replaceMethod = [IO.File].GetMethod('Replace', [Type[]]@([string], [string], [string], [bool]))
+                if ($null -eq $replaceMethod) { throw 'required System.IO.File.Replace overload is unavailable' }
+                $replaceArguments = New-Object 'object[]' 4
+                $replaceArguments[0] = $temporary
+                $replaceArguments[1] = $Path
+                $replaceArguments[2] = $null
+                $replaceArguments[3] = $true
+                [void]$replaceMethod.Invoke($null, $replaceArguments)
             } else {
                 Move-Item -LiteralPath $temporary -Destination $Path -ErrorAction Stop
             }
