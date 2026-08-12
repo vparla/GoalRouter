@@ -364,7 +364,7 @@ function Resolve-GoalRouterHostPath {
     $nativeResult = Invoke-GoalRouterNative -FilePath 'wsl.exe' -Arguments $nativeArguments -CaptureOutput $true
     if ([int]$nativeResult.ExitCode -ne 0) { throw "wslpath failed for $label with exit code $($nativeResult.ExitCode)" }
     $output = @($nativeResult.Output)
-    if ($output.Count -ne 1 -or -not (Test-GoalRouterPathText ([string]$output[0]))) { throw "wslpath returned an invalid $label path" }
+    if ($output.Count -ne 1 -or -not (Test-GoalRouterPathText ([string]$output[0])) -or -not ([string]$output[0]).StartsWith('/')) { throw "wslpath returned an invalid $label path" }
     return [pscustomobject]@{ ProviderPath = $windowsPath; WslPath = [string]$output[0] }
 }
 

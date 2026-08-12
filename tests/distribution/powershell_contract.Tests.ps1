@@ -152,6 +152,26 @@ Invoke-Contract 'each literal path uses exact selected-distribution wslpath argv
     Assert-Equal $state.Calls[0].Arguments @('-d', 'Ubuntu-24.04', '--exec', 'wslpath', '-a', '-u', '--', 'C:\Work Trees\Repo! (one)') 'provider-native wslpath argv'
 }
 
+Invoke-Contract 'launcher rejects relative POSIX wslpath output' {
+    $state = New-FakeWslState
+    Add-FakePath -State $state -Path 'C:\Work Trees\Repo! (one)' -ProviderPath 'C:\Work Trees\Repo! (one)'
+    $script:GoalRouterPathResolver = New-FakePathResolver -State $state
+    $script:GoalRouterNativeInvoker = { [pscustomobject]@{ ExitCode = 0; Output = @('relative/path') } }
+    Assert-Throws {
+        Resolve-GoalRouterPath -Path 'C:\Work Trees\Repo! (one)' -Kind Directory -Label project -Distribution 'Ubuntu-24.04'
+    } 'wslpath returned an invalid project path' 'relative POSIX wslpath output'
+}
+
+Invoke-Contract 'launcher rejects Windows-looking wslpath output' {
+    $state = New-FakeWslState
+    Add-FakePath -State $state -Path 'C:\Work Trees\Repo! (one)' -ProviderPath 'C:\Work Trees\Repo! (one)'
+    $script:GoalRouterPathResolver = New-FakePathResolver -State $state
+    $script:GoalRouterNativeInvoker = { [pscustomobject]@{ ExitCode = 0; Output = @('C:\unexpected') } }
+    Assert-Throws {
+        Resolve-GoalRouterPath -Path 'C:\Work Trees\Repo! (one)' -Kind Directory -Label project -Distribution 'Ubuntu-24.04'
+    } 'wslpath returned an invalid project path' 'Windows-looking wslpath output'
+}
+
 Invoke-Contract 'provider-native mapped UNC and wrong-kind paths fail before WSL' {
     $state = New-FakeWslState
     Add-FakePath -State $state -Path 'C:\Mapped\Repo' -ProviderPath '\\server\share\Repo'

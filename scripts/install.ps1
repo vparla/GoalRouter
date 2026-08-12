@@ -1138,7 +1138,7 @@ function Convert-GoalRouterLifecyclePathToWsl {
     $result = & $NativeInvoker -FilePath 'wsl.exe' -Arguments $arguments -CaptureOutput $true
     if ([int]$result.ExitCode -ne 0) { throw "native prerequisite or candidate command failed with exit code $($result.ExitCode)" }
     $output = @($result.Output)
-    if ($output.Count -ne 1 -or -not (Test-GoalRouterLifecyclePathText ([string]$output[0]))) { throw 'wslpath returned invalid output' }
+    if ($output.Count -ne 1 -or -not (Test-GoalRouterLifecyclePathText ([string]$output[0])) -or -not ([string]$output[0]).StartsWith('/')) { throw 'wslpath returned invalid output' }
     return [string]$output[0]
 }
 

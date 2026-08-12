@@ -125,6 +125,20 @@ Invoke-Contract 'installer path conversion directly executes exact literal wslpa
     Assert-Equal $calls[0].Arguments @('-d', 'Ubuntu-24.04', '--exec', 'wslpath', '-a', '-u', '--', $windowsPath) 'installer direct-exec wslpath argv'
 }
 
+Invoke-Contract 'installer rejects relative POSIX wslpath output' {
+    $native = { [pscustomobject]@{ ExitCode = 0; Output = @('relative/path') } }
+    Assert-Throws {
+        Convert-GoalRouterLifecyclePathToWsl -Path 'C:\Work Trees\Stage! (one)\task-models.yaml' -Distribution 'Ubuntu-24.04' -NativeInvoker $native
+    } 'wslpath returned invalid output' 'relative POSIX wslpath output'
+}
+
+Invoke-Contract 'installer rejects Windows-looking wslpath output' {
+    $native = { [pscustomobject]@{ ExitCode = 0; Output = @('C:\unexpected') } }
+    Assert-Throws {
+        Convert-GoalRouterLifecyclePathToWsl -Path 'C:\Work Trees\Stage! (one)\task-models.yaml' -Distribution 'Ubuntu-24.04' -NativeInvoker $native
+    } 'wslpath returned invalid output' 'Windows-looking wslpath output'
+}
+
 Invoke-Contract 'release URI validation is HTTPS or explicit loopback fixture only' {
     Assert-Equal (Assert-GoalRouterReleaseUri -Uri 'https://github.com/vparla/GoalRouter/releases/download/v1.0.0' -AllowLoopbackHttp $false).Scheme 'https' 'HTTPS release'
     Assert-Equal (Assert-GoalRouterReleaseUri -Uri 'http://127.0.0.1:8123/release' -AllowLoopbackHttp $true).Host '127.0.0.1' 'loopback fixture'
