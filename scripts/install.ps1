@@ -528,9 +528,14 @@ function Test-GoalRouterCandidateImage {
         [Parameter(Mandatory = $true)][scriptblock]$NativeInvoker
     )
     [void](Invoke-GoalRouterLifecycleNative -NativeInvoker $NativeInvoker -Distribution $Distribution -Arguments @('docker', 'pull', [string]$Manifest.image))
-    $digestResult = Invoke-GoalRouterLifecycleNative -NativeInvoker $NativeInvoker -Distribution $Distribution -Arguments @('docker', 'image', 'inspect', '--format', '{{range .RepoDigests}}{{println .}}{{end}}', [string]$Manifest.image)
+    $digestResult = Invoke-GoalRouterLifecycleNative -NativeInvoker $NativeInvoker -Distribution $Distribution -Arguments @('docker', 'image', 'inspect', '--format', '{{json .RepoDigests}}', [string]$Manifest.image)
     $repository = Get-GoalRouterImageRepository -Image ([string]$Manifest.image)
-    $repoDigests = @($digestResult.Output)
+    $digestOutput = @($digestResult.Output)
+    if ($digestOutput.Count -ne 1) { throw 'candidate image repository digest output is invalid' }
+    $digestJson = [string]$digestOutput[0]
+    if ($digestJson -cnotmatch '\A\[.*\]\z') { throw 'candidate image repository digest JSON is invalid' }
+    try { $repoDigests = @($digestJson | ConvertFrom-Json -ErrorAction Stop) }
+    catch { throw 'candidate image repository digest JSON is invalid' }
     if ($repoDigests.Count -ne 1 -or [string]$repoDigests[0] -cnotmatch ('\A' + [regex]::Escape($repository) + '@sha256:[0-9a-f]{64}\z')) { throw 'candidate image must have one canonical repository digest' }
     $repoDigest = [string]$repoDigests[0]
     $actualDigest = $repoDigest.Substring($repoDigest.IndexOf('@') + 1)

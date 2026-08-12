@@ -341,6 +341,7 @@ Invoke-Contract 'trusted install manifest has Task 6 common fields and Windows-o
 
 Invoke-Contract 'candidate validation orders digest platform revision before first run' {
     $calls = [System.Collections.ArrayList]::new()
+    $digestJson = '["ghcr.io/vparla/goalrouter@sha256:' + ('a' * 64) + '"]'
     $native = {
         param([string]$FilePath, [string[]]$Arguments, [bool]$CaptureOutput)
         [void]$calls.Add(@($Arguments))
@@ -348,7 +349,7 @@ Invoke-Contract 'candidate validation orders digest platform revision before fir
         $joined = $command -join ' '
         if ($joined -match 'docker pull') { return [pscustomobject]@{ ExitCode = 0; Output = @() } }
         if ($joined -match '\.Architecture') { return [pscustomobject]@{ ExitCode = 0; Output = @('amd64') } }
-        if ($joined -match 'RepoDigests') { return [pscustomobject]@{ ExitCode = 0; Output = @('ghcr.io/vparla/goalrouter@sha256:' + ('a' * 64)) } }
+        if ($joined -match 'RepoDigests') { return [pscustomobject]@{ ExitCode = 0; Output = @($digestJson) } }
         if ($joined -match 'image\.revision') { return [pscustomobject]@{ ExitCode = 0; Output = @('0123456789abcdef') } }
         if ($joined -match 'docker run') { return [pscustomobject]@{ ExitCode = 0; Output = @('{"version":"1.0.0","protocol_version":1}') } }
         throw "unexpected native call: $joined"
@@ -356,6 +357,8 @@ Invoke-Contract 'candidate validation orders digest platform revision before fir
     $manifest = (New-ReleaseManifestJson | ConvertFrom-Json)
     $result = Test-GoalRouterCandidateImage -Manifest $manifest -Distribution 'Ubuntu-24.04' -Platform 'linux/amd64' -NativeInvoker $native
     Assert-Equal $result.RepoDigest ('ghcr.io/vparla/goalrouter@sha256:' + ('a' * 64)) 'canonical RepoDigest'
+    $digestCall = @($calls | Where-Object { ($_ -join ' ') -match 'RepoDigests' })[0]
+    Assert-Equal $digestCall[3..($digestCall.Count - 1)] @('docker', 'image', 'inspect', '--format', '{{json .RepoDigests}}', 'ghcr.io/vparla/goalrouter:1.0.0') 'RepoDigests JSON query'
     Assert-True ((@($calls | ForEach-Object { $_ -join ' ' }) -join "`n") -match 'docker run') 'candidate eventually executes'
 
     $badManifest = New-ReleaseManifestJson -Digest ('sha256:' + ('b' * 64)) | ConvertFrom-Json
@@ -720,7 +723,7 @@ function New-FullInstallerFixture {
         if ($joined -match ' docker info ') { return [pscustomobject]@{ ExitCode = 0; Output = @('x86_64') } }
         if ($joined -match ' docker pull ') { return [pscustomobject]@{ ExitCode = 0; Output = @() } }
         if ($joined -match '\.Architecture') { return [pscustomobject]@{ ExitCode = 0; Output = @('amd64') } }
-        if ($joined -match 'RepoDigests') { return [pscustomobject]@{ ExitCode = 0; Output = @('ghcr.io/vparla/goalrouter@' + $fixture.Digest) } }
+        if ($joined -match 'RepoDigests') { return [pscustomobject]@{ ExitCode = 0; Output = @('["ghcr.io/vparla/goalrouter@' + $fixture.Digest + '"]') } }
         if ($joined -match 'image\.revision') { return [pscustomobject]@{ ExitCode = 0; Output = @($fixture.Revision) } }
         if ($joined -match ' --json version') { return [pscustomobject]@{ ExitCode = 0; Output = @('{"version":"' + $fixture.Version + '","protocol_version":1}') } }
         if ($joined -match ' config template') { return [pscustomobject]@{ ExitCode = 0; Output = @('version: 1', 'tasks: {}') } }
@@ -1286,7 +1289,7 @@ Invoke-Contract 'install rollback attempts every restoration and restores PATH a
 }
 
 Invoke-Contract 'candidate inspection binds platform and revision to the resolved RepoDigest' {
-    $calls = [System.Collections.ArrayList]::new(); $digest = 'sha256:' + ('a' * 64); $repoDigest = "registry.example/router@$digest"; $digestState = [pscustomobject]@{ Output = @($repoDigest) }
+    $calls = [System.Collections.ArrayList]::new(); $digest = 'sha256:' + ('a' * 64); $repoDigest = "registry.example/router@$digest"; $digestJson = '["' + $repoDigest + '"]'; $digestState = [pscustomobject]@{ Output = @($digestJson) }
     $native = {
         param([string]$FilePath, [string[]]$Arguments, [bool]$CaptureOutput)
         [void]$calls.Add(@($Arguments))
@@ -1301,10 +1304,21 @@ Invoke-Contract 'candidate inspection binds platform and revision to the resolve
     [void](Test-GoalRouterCandidateImage -Manifest $manifest -Distribution Ubuntu -Platform 'linux/amd64' -NativeInvoker $native)
     $inspectCalls = @($calls | Where-Object { ($_ -join ' ') -match '\.Architecture|image\.revision' })
     foreach ($call in $inspectCalls) { Assert-Equal $call[-1] $repoDigest 'immutable inspect target' }
-    foreach ($extra in @('other.example/router@sha256:' + ('b' * 64), 'unexpected diagnostic')) {
-        $calls.Clear(); $digestState.Output = @($repoDigest, $extra)
-        Assert-Throws { Test-GoalRouterCandidateImage -Manifest $manifest -Distribution Ubuntu -Platform 'linux/amd64' -NativeInvoker $native } 'one canonical repository digest' "extra raw RepoDigest output $extra"
-        Assert-True ((@($calls | ForEach-Object { $_ -join ' ' }) -join "`n") -notmatch 'docker run') 'extra raw RepoDigest output fails before candidate execution'
+    $invalidOutputs = @(
+        @{ Name = 'missing native output record'; Output = @() },
+        @{ Name = 'malformed JSON'; Output = @('[not-json]') },
+        @{ Name = 'JSON scalar'; Output = @('"' + $repoDigest + '"') },
+        @{ Name = 'extra native output record'; Output = @($digestJson, '') },
+        @{ Name = 'empty JSON array'; Output = @('[]') },
+        @{ Name = 'multiple-element JSON array'; Output = @('["' + $repoDigest + '","registry.example/router@sha256:' + ('b' * 64) + '"]') },
+        @{ Name = 'foreign repository'; Output = @('["other.example/router@' + $digest + '"]') },
+        @{ Name = 'invalid digest'; Output = @('["registry.example/router@sha256:' + ('a' * 63) + '"]') },
+        @{ Name = 'manifest digest mismatch'; Output = @('["registry.example/router@sha256:' + ('b' * 64) + '"]') }
+    )
+    foreach ($case in $invalidOutputs) {
+        $calls.Clear(); $digestState.Output = @($case.Output)
+        Assert-Throws { Test-GoalRouterCandidateImage -Manifest $manifest -Distribution Ubuntu -Platform 'linux/amd64' -NativeInvoker $native } 'digest' $case.Name
+        Assert-True ((@($calls | ForEach-Object { $_ -join ' ' }) -join "`n") -notmatch '\.Architecture|image\.revision|docker run') "$($case.Name) fails before architecture or runtime use"
     }
 }
 
