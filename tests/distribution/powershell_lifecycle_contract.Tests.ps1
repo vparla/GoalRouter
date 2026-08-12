@@ -1652,17 +1652,20 @@ Invoke-Contract 'recovery journal is one atomic checksummed record and self-remo
     $replaceStart = $installerSource.IndexOf('$replace = {')
     $replaceBlock = $installerSource.Substring($replaceStart, $installerSource.IndexOf('$restore = {') - $replaceStart)
     Assert-True (-not $replaceBlock.Contains('[IO.File]::Replace($temporary, $Path, $null, $true)')) 'existing journal targets bypass the PowerShell static binder for a null backup'
-    Assert-True $replaceBlock.Contains("[IO.File].GetMethod('Replace', [Type[]]@([string], [string], [string], [bool]))") 'replacement resolves the exact four-argument File.Replace overload'
-    Assert-True $replaceBlock.Contains("if (`$null -eq `$replaceMethod) { throw 'required System.IO.File.Replace overload is unavailable' }") 'missing exact replacement overload fails explicitly'
+    Assert-True $installerSource.Contains("[IO.File].GetMethod('Replace', [Type[]]@([string], [string], [string], [bool]))") 'replacement resolves the exact four-argument File.Replace overload'
+    Assert-True $installerSource.Contains("if (`$null -eq `$atomicReplaceMethod) { throw 'required System.IO.File.Replace overload is unavailable' }") 'missing exact replacement overload fails explicitly'
     Assert-True $replaceBlock.Contains("New-Object 'object[]' 4") 'replacement arguments use a PowerShell 5.1-compatible raw four-element object array'
-    Assert-True $replaceBlock.Contains('$replaceArguments[0] = $temporary') 'replacement source is the same-parent temporary file'
-    Assert-True $replaceBlock.Contains('$replaceArguments[1] = $Path') 'replacement destination is the owned path'
+    Assert-True $replaceBlock.Contains('$replaceArguments[0] = [string]$temporary') 'replacement source is the same-parent temporary file as a native string'
+    Assert-True $replaceBlock.Contains('$replaceArguments[1] = [string]$Path') 'replacement destination is the owned path as a native string'
     Assert-True $replaceBlock.Contains('$replaceArguments[2] = $null') 'replacement carries a true null backup argument'
-    Assert-True $replaceBlock.Contains('$replaceArguments[3] = $true') 'replacement ignores metadata errors through the exact overload'
-    Assert-True $replaceBlock.Contains('$replaceMethod.Invoke($null, $replaceArguments)') 'replacement invokes the resolved overload through reflection'
+    Assert-True $replaceBlock.Contains('$replaceArguments[3] = [bool]$true') 'replacement ignores metadata errors through the exact overload as a native bool'
+    Assert-True $installerSource.Contains('$atomicReplaceMethod.Invoke($null, $Arguments)') 'replacement invoker uses the resolved overload through reflection'
+    Assert-True $replaceBlock.Contains('& $invokeAtomicReplace $replaceArguments') 'replacement sends the raw argument array to the internal reflection invoker'
     Assert-True (-not $replaceBlock.Contains('Move-Item -LiteralPath $Path -Destination $backup')) 'existing target is never moved away before replacement'
     Assert-True (-not $replaceBlock.Contains("'.bak'")) 'atomic replacement creates no untracked backup residue'
-    Assert-True $replaceBlock.Contains('if (Test-Path -LiteralPath $temporary -PathType Leaf) { Remove-Item -LiteralPath $temporary -ErrorAction Stop }') 'failed replacement removes its same-parent temporary file'
+    Assert-True $replaceBlock.Contains('if (Test-Path -LiteralPath $temporary -PathType Leaf) { Remove-Item -LiteralPath $temporary -Force -ErrorAction Stop }') 'failed replacement forcibly removes its known same-parent temporary file'
+    Assert-True $replaceBlock.Contains('$failure.Exception -is [Management.Automation.MethodInvocationException]') 'reflection binder failures are identified after temporary cleanup'
+    Assert-True $replaceBlock.Contains('throw $failure.Exception.InnerException') 'reflection binder failures expose the underlying replacement exception object'
     Assert-True $replaceBlock.Contains('throw $failure') 'replacement failure remains unchanged after cleanup'
 }
 
@@ -1676,7 +1679,92 @@ Invoke-Contract 'runtime exposes the exact atomic replacement overload and raw n
     $replaceArguments[2] = $null
     $replaceArguments[3] = $true
     Assert-Equal $replaceArguments.Count 4 'raw replacement argument count'
+    Assert-Equal $replaceArguments.GetType() ([object[]]) 'raw replacement argument runtime type'
     Assert-True ($null -eq $replaceArguments[2]) 'raw replacement backup remains true null'
+}
+
+if ($null -eq ('GoalRouter.Testing.AtomicReplaceFixture' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.IO;
+namespace GoalRouter.Testing {
+    public static class AtomicReplaceFixture {
+        public static bool Fail { get; set; }
+        public static bool SawNullBackup { get; private set; }
+        public static bool SawIgnoreMetadataErrors { get; private set; }
+        public static void Reset(bool fail) {
+            Fail = fail;
+            SawNullBackup = false;
+            SawIgnoreMetadataErrors = false;
+        }
+        public static void Replace(string sourceFileName, string destinationFileName, string destinationBackupFileName, bool ignoreMetadataErrors) {
+            SawNullBackup = destinationBackupFileName == null;
+            SawIgnoreMetadataErrors = ignoreMetadataErrors;
+            if (!SawNullBackup) throw new InvalidOperationException("fixture received a backup path");
+            if (!SawIgnoreMetadataErrors) throw new InvalidOperationException("fixture received false ignoreMetadataErrors");
+            if (Fail) throw new IOException("fixture atomic replacement failure");
+            File.Delete(destinationFileName);
+            File.Move(sourceFileName, destinationFileName);
+        }
+    }
+}
+'@ -ErrorAction Stop
+}
+
+Invoke-Contract 'production replacement atomically changes an existing destination without artifacts' {
+    $fixtureRoot = Join-Path '/tmp' ('goalrouter-replace-success-' + [guid]::NewGuid().ToString('N'))
+    [void][IO.Directory]::CreateDirectory($fixtureRoot)
+    try {
+        $destination = Join-Path $fixtureRoot 'install.json'
+        [IO.File]::WriteAllText($destination, 'old')
+        [GoalRouter.Testing.AtomicReplaceFixture]::Reset($false)
+        $fixtureMethod = [GoalRouter.Testing.AtomicReplaceFixture].GetMethod('Replace', [Type[]]@([string], [string], [string], [bool]))
+        $invoker = { param([object[]]$Arguments); [void]$fixtureMethod.Invoke($null, $Arguments) }.GetNewClosure()
+        $ports = New-GoalRouterProductionLifecyclePorts -AtomicReplaceInvoker $invoker
+
+        try { & $ports.Replace -Path $destination -Content 'new' }
+        catch {
+            Assert-True ([GoalRouter.Testing.AtomicReplaceFixture]::SawNullBackup) 'successful fixture resolver was invoked before replacement failed'
+            throw
+        }
+
+        Assert-Equal ([IO.File]::ReadAllText($destination)) 'new' 'existing destination content'
+        Assert-True ([GoalRouter.Testing.AtomicReplaceFixture]::SawNullBackup) 'production invocation supplies a true null backup'
+        Assert-True ([GoalRouter.Testing.AtomicReplaceFixture]::SawIgnoreMetadataErrors) 'production invocation supplies true ignoreMetadataErrors'
+        Assert-Equal @(Get-ChildItem -LiteralPath $fixtureRoot -Force | ForEach-Object { $_.Name }) @('install.json') 'successful replacement leaves no backup or temporary artifact'
+    } finally {
+        if (Test-Path -LiteralPath $fixtureRoot) { Remove-Item -LiteralPath $fixtureRoot -Recurse -Force -ErrorAction Stop }
+    }
+}
+
+Invoke-Contract 'production replacement cleans its temporary file and preserves the underlying failure' {
+    $fixtureRoot = Join-Path '/tmp' ('goalrouter-replace-failure-' + [guid]::NewGuid().ToString('N'))
+    [void][IO.Directory]::CreateDirectory($fixtureRoot)
+    try {
+        $destination = Join-Path $fixtureRoot 'install.json'
+        [IO.File]::WriteAllText($destination, 'old')
+        [GoalRouter.Testing.AtomicReplaceFixture]::Reset($true)
+        $fixtureMethod = [GoalRouter.Testing.AtomicReplaceFixture].GetMethod('Replace', [Type[]]@([string], [string], [string], [bool]))
+        $invoker = { param([object[]]$Arguments); [void]$fixtureMethod.Invoke($null, $Arguments) }.GetNewClosure()
+        $ports = New-GoalRouterProductionLifecyclePorts -AtomicReplaceInvoker $invoker
+        $caught = $null
+        $priorErrorCount = $Error.Count
+
+        try { & $ports.Replace -Path $destination -Content 'new' } catch { $caught = $_ }
+
+        $addedErrorCount = $Error.Count - $priorErrorCount
+        for ($index = 0; $index -lt $addedErrorCount; $index++) { $Error.RemoveAt(0) }
+        Assert-True ($null -ne $caught) 'locked destination replacement throws'
+        Assert-True ([GoalRouter.Testing.AtomicReplaceFixture]::SawNullBackup) 'failed production invocation supplies a true null backup'
+        Assert-True ([GoalRouter.Testing.AtomicReplaceFixture]::SawIgnoreMetadataErrors) 'failed production invocation supplies true ignoreMetadataErrors'
+        Assert-True ($caught.Exception -is [IO.IOException]) 'underlying replacement IOException is exposed'
+        Assert-True ($caught.Exception -isnot [Reflection.TargetInvocationException]) 'reflection wrapper is not exposed'
+        Assert-Equal $caught.Exception.Message 'fixture atomic replacement failure' 'underlying replacement message is preserved exactly'
+        Assert-Equal @(Get-ChildItem -LiteralPath $fixtureRoot -Force | ForEach-Object { $_.Name }) @('install.json') 'failed replacement removes its same-parent temporary file'
+        Assert-Equal ([IO.File]::ReadAllText($destination)) 'old' 'failed replacement leaves the destination unchanged'
+    } finally {
+        if (Test-Path -LiteralPath $fixtureRoot) { Remove-Item -LiteralPath $fixtureRoot -Recurse -Force -ErrorAction Stop }
+    }
 }
 
 Invoke-Contract 'public bounded final cleanup retries only canonical lifecycle residuals' {

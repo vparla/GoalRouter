@@ -643,6 +643,13 @@ function Ensure-GoalRouterDirectoryChain {
 }
 
 function New-GoalRouterProductionLifecyclePorts {
+    param([scriptblock]$AtomicReplaceInvoker)
+    if ($null -eq $AtomicReplaceInvoker) {
+        $atomicReplaceMethod = [IO.File].GetMethod('Replace', [Type[]]@([string], [string], [string], [bool]))
+        if ($null -eq $atomicReplaceMethod) { throw 'required System.IO.File.Replace overload is unavailable' }
+        $AtomicReplaceInvoker = { param([object[]]$Arguments); [void]$atomicReplaceMethod.Invoke($null, $Arguments) }.GetNewClosure()
+    }
+    $invokeAtomicReplace = $AtomicReplaceInvoker
     $native = {
         param([string]$FilePath, [string[]]$Arguments, [bool]$CaptureOutput)
         $output = @(& $FilePath @Arguments 2>&1)
@@ -884,23 +891,24 @@ namespace GoalRouter {
         try {
             if (Test-Path -LiteralPath $Path) {
                 if (-not $hadTarget -or (([IO.File]::GetAttributes($Path) -band [IO.FileAttributes]::ReparsePoint) -ne 0)) { throw "owned replacement target is unsafe: $Path" }
-                $replaceMethod = [IO.File].GetMethod('Replace', [Type[]]@([string], [string], [string], [bool]))
-                if ($null -eq $replaceMethod) { throw 'required System.IO.File.Replace overload is unavailable' }
                 $replaceArguments = New-Object 'object[]' 4
-                $replaceArguments[0] = $temporary
-                $replaceArguments[1] = $Path
+                $replaceArguments[0] = [string]$temporary
+                $replaceArguments[1] = [string]$Path
                 $replaceArguments[2] = $null
-                $replaceArguments[3] = $true
-                [void]$replaceMethod.Invoke($null, $replaceArguments)
+                $replaceArguments[3] = [bool]$true
+                & $invokeAtomicReplace $replaceArguments
             } else {
                 Move-Item -LiteralPath $temporary -Destination $Path -ErrorAction Stop
             }
         } catch {
             $failure = $_
-            if (Test-Path -LiteralPath $temporary -PathType Leaf) { Remove-Item -LiteralPath $temporary -ErrorAction Stop }
+            if (Test-Path -LiteralPath $temporary -PathType Leaf) { Remove-Item -LiteralPath $temporary -Force -ErrorAction Stop }
+            if ($failure.Exception -is [Management.Automation.MethodInvocationException] -and $null -ne $failure.Exception.InnerException) {
+                throw $failure.Exception.InnerException
+            }
             throw $failure
         }
-    }
+    }.GetNewClosure()
     $restore = {
         param([string]$Path, $Snapshot)
         if (Test-Path -LiteralPath $Path -PathType Leaf) { Remove-Item -LiteralPath $Path -ErrorAction Stop }
