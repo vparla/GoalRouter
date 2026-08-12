@@ -343,6 +343,7 @@ Invoke-Contract 'candidate validation orders digest platform revision before fir
     $calls = [System.Collections.ArrayList]::new()
     $digestJson = '["ghcr.io/vparla/goalrouter@sha256:' + ('a' * 64) + '"]'
     $labelsJson = '{"org.opencontainers.image.revision":"0123456789abcdef"}'
+    $versionJson = @('{', '  "image_reference": null,', '  "image_revision": "0123456789abcdef",', '  "protocol_version": 1,', '  "version": "1.0.0"', '}')
     $native = {
         param([string]$FilePath, [string[]]$Arguments, [bool]$CaptureOutput)
         [void]$calls.Add(@($Arguments))
@@ -352,7 +353,7 @@ Invoke-Contract 'candidate validation orders digest platform revision before fir
         if ($joined -match '\.Architecture') { return [pscustomobject]@{ ExitCode = 0; Output = @('amd64') } }
         if ($joined -match 'RepoDigests') { return [pscustomobject]@{ ExitCode = 0; Output = @($digestJson) } }
         if ($joined -match 'Config\.Labels') { return [pscustomobject]@{ ExitCode = 0; Output = @($labelsJson) } }
-        if ($joined -match 'docker run') { return [pscustomobject]@{ ExitCode = 0; Output = @('{"version":"1.0.0","protocol_version":1}') } }
+        if ($joined -match 'docker run') { return [pscustomobject]@{ ExitCode = 0; Output = @($versionJson) } }
         throw "unexpected native call: $joined"
     }.GetNewClosure()
     $manifest = (New-ReleaseManifestJson | ConvertFrom-Json)
@@ -729,7 +730,7 @@ function New-FullInstallerFixture {
         if ($joined -match '\.Architecture') { return [pscustomobject]@{ ExitCode = 0; Output = @('amd64') } }
         if ($joined -match 'RepoDigests') { return [pscustomobject]@{ ExitCode = 0; Output = @('["ghcr.io/vparla/goalrouter@' + $fixture.Digest + '"]') } }
         if ($joined -match 'Config\.Labels') { return [pscustomobject]@{ ExitCode = 0; Output = @('{"org.opencontainers.image.revision":"' + $fixture.Revision + '"}') } }
-        if ($joined -match ' --json version') { return [pscustomobject]@{ ExitCode = 0; Output = @('{"version":"' + $fixture.Version + '","protocol_version":1}') } }
+        if ($joined -match ' --json version') { return [pscustomobject]@{ ExitCode = 0; Output = @('{"image_reference":null,"image_revision":"' + $fixture.Revision + '","protocol_version":1,"version":"' + $fixture.Version + '"}') } }
         if ($joined -match ' config template') { return [pscustomobject]@{ ExitCode = 0; Output = @('version: 1', 'tasks: {}') } }
         if ($joined -match ' config validate') { return [pscustomobject]@{ ExitCode = 0; Output = @() } }
         if ($joined -match ' wslpath ') { return [pscustomobject]@{ ExitCode = 0; Output = @('/mnt/d/fake-path') } }
@@ -1293,7 +1294,7 @@ Invoke-Contract 'install rollback attempts every restoration and restores PATH a
 }
 
 Invoke-Contract 'candidate inspection binds platform and revision to the resolved RepoDigest' {
-    $calls = [System.Collections.ArrayList]::new(); $digest = 'sha256:' + ('a' * 64); $repoDigest = "registry.example/router@$digest"; $digestJson = '["' + $repoDigest + '"]'; $digestState = [pscustomobject]@{ Output = @($digestJson) }; $labelState = [pscustomobject]@{ Output = @('{"org.opencontainers.image.revision":"rev"}') }
+    $calls = [System.Collections.ArrayList]::new(); $digest = 'sha256:' + ('a' * 64); $repoDigest = "registry.example/router@$digest"; $digestJson = '["' + $repoDigest + '"]'; $digestState = [pscustomobject]@{ Output = @($digestJson) }; $labelState = [pscustomobject]@{ Output = @('{"org.opencontainers.image.revision":"rev"}') }; $compactVersionJson = '{"image_reference":null,"image_revision":"rev","protocol_version":1,"version":"1.0.0"}'; $versionState = [pscustomobject]@{ Output = @($compactVersionJson) }
     $native = {
         param([string]$FilePath, [string[]]$Arguments, [bool]$CaptureOutput)
         [void]$calls.Add(@($Arguments))
@@ -1302,7 +1303,8 @@ Invoke-Contract 'candidate inspection binds platform and revision to the resolve
         if ($joined -match 'RepoDigests') { return [pscustomobject]@{ ExitCode = 0; Output = @($digestState.Output) } }
         if ($joined -match '\.Architecture') { return [pscustomobject]@{ ExitCode = 0; Output = @('amd64') } }
         if ($joined -match 'Config\.Labels') { return [pscustomobject]@{ ExitCode = 0; Output = @($labelState.Output) } }
-        return [pscustomobject]@{ ExitCode = 0; Output = @('{"version":"1.0.0","protocol_version":1}') }
+        if ($joined -match 'docker run') { return [pscustomobject]@{ ExitCode = 0; Output = @($versionState.Output) } }
+        throw "unexpected native call: $joined"
     }.GetNewClosure()
     $manifest = (New-ReleaseManifestJson -Image 'registry.example/router:1.0.0' -Revision 'rev') | ConvertFrom-Json
     [void](Test-GoalRouterCandidateImage -Manifest $manifest -Distribution Ubuntu -Platform 'linux/amd64' -NativeInvoker $native)
@@ -1343,6 +1345,48 @@ Invoke-Contract 'candidate inspection binds platform and revision to the resolve
         $calls.Clear(); $digestState.Output = @($digestJson); $labelState.Output = @($case.Output)
         Assert-Throws { Test-GoalRouterCandidateImage -Manifest $manifest -Distribution Ubuntu -Platform 'linux/amd64' -NativeInvoker $native } 'label|revision' $case.Name
         Assert-True ((@($calls | ForEach-Object { $_ -join ' ' }) -join "`n") -notmatch 'docker run') "$($case.Name) fails before candidate execution"
+    }
+
+    $prettyVersion = @('{', '  "image_reference": null,', '  "image_revision": "rev",', '  "protocol_version": 1,', '  "version": "1.0.0"', '}')
+    $labelState.Output = @('{"org.opencontainers.image.revision":"rev"}')
+    $versionState.Output = @($prettyVersion)
+    $prettyResult = Test-GoalRouterCandidateImage -Manifest $manifest -Distribution Ubuntu -Platform 'linux/amd64' -NativeInvoker $native
+    Assert-Equal $prettyResult.Runtime.image_revision 'rev' 'pretty version document revision'
+    $versionState.Output = @($compactVersionJson)
+    $compactResult = Test-GoalRouterCandidateImage -Manifest $manifest -Distribution Ubuntu -Platform 'linux/amd64' -NativeInvoker $native
+    Assert-Equal $compactResult.Runtime.version '1.0.0' 'compact version document'
+
+    $invalidVersions = @(
+        @{ Name = 'missing version output records'; Output = @() },
+        @{ Name = 'null version output record'; Output = @($null) },
+        @{ Name = 'non-string version output record'; Output = @(7) },
+        @{ Name = 'control-bearing version output record'; Output = @("bad`nrecord") },
+        @{ Name = 'diagnostic before version document'; Output = @('diagnostic', $compactVersionJson) },
+        @{ Name = 'diagnostic after version document'; Output = @($compactVersionJson, 'diagnostic') },
+        @{ Name = 'multiple version documents'; Output = @($compactVersionJson, $compactVersionJson) },
+        @{ Name = 'malformed version JSON'; Output = @('{not-json}') },
+        @{ Name = 'scalar version JSON'; Output = @('"1.0.0"') },
+        @{ Name = 'array version JSON'; Output = @('[]') },
+        @{ Name = 'null version JSON'; Output = @('null') },
+        @{ Name = 'missing version property'; Output = @('{"image_reference":null,"image_revision":"rev","protocol_version":1}') },
+        @{ Name = 'extra version property'; Output = @('{"image_reference":null,"image_revision":"rev","protocol_version":1,"version":"1.0.0","extra":true}') },
+        @{ Name = 'wrong-case version property'; Output = @('{"image_reference":null,"image_revision":"rev","protocol_version":1,"Version":"1.0.0"}') },
+        @{ Name = 'non-null image reference'; Output = @('{"image_reference":"registry.example/router","image_revision":"rev","protocol_version":1,"version":"1.0.0"}') },
+        @{ Name = 'null image revision'; Output = @('{"image_reference":null,"image_revision":null,"protocol_version":1,"version":"1.0.0"}') },
+        @{ Name = 'non-string image revision'; Output = @('{"image_reference":null,"image_revision":7,"protocol_version":1,"version":"1.0.0"}') },
+        @{ Name = 'control-bearing image revision'; Output = @('{"image_reference":null,"image_revision":"rev\nbad","protocol_version":1,"version":"1.0.0"}') },
+        @{ Name = 'image revision mismatch'; Output = @('{"image_reference":null,"image_revision":"other","protocol_version":1,"version":"1.0.0"}') },
+        @{ Name = 'string protocol'; Output = @('{"image_reference":null,"image_revision":"rev","protocol_version":"1","version":"1.0.0"}') },
+        @{ Name = 'fractional protocol'; Output = @('{"image_reference":null,"image_revision":"rev","protocol_version":1.5,"version":"1.0.0"}') },
+        @{ Name = 'protocol mismatch'; Output = @('{"image_reference":null,"image_revision":"rev","protocol_version":2,"version":"1.0.0"}') },
+        @{ Name = 'null version'; Output = @('{"image_reference":null,"image_revision":"rev","protocol_version":1,"version":null}') },
+        @{ Name = 'non-string version'; Output = @('{"image_reference":null,"image_revision":"rev","protocol_version":1,"version":100}') },
+        @{ Name = 'control-bearing version'; Output = @('{"image_reference":null,"image_revision":"rev","protocol_version":1,"version":"1.0.0\nbad"}') },
+        @{ Name = 'version mismatch'; Output = @('{"image_reference":null,"image_revision":"rev","protocol_version":1,"version":"9.9.9"}') }
+    )
+    foreach ($case in $invalidVersions) {
+        $calls.Clear(); $versionState.Output = $case.Output
+        Assert-Throws { Test-GoalRouterCandidateImage -Manifest $manifest -Distribution Ubuntu -Platform 'linux/amd64' -NativeInvoker $native } 'version|protocol|runtime' $case.Name
     }
 }
 

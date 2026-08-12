@@ -557,12 +557,25 @@ function Test-GoalRouterCandidateImage {
     $revision = [string]$revisionProperties[0].Value
     if ($revision -cne [string]$Manifest.source_revision) { throw 'candidate image revision does not match trusted release manifest' }
     $versionResult = Invoke-GoalRouterLifecycleNative -NativeInvoker $NativeInvoker -Distribution $Distribution -Arguments @('docker', 'run', '--rm', '--read-only', '--tmpfs', '/tmp:rw,exec,nosuid,size=64m,mode=1777', $repoDigest, '--json', 'version')
-    $versionLines = @($versionResult.Output)
-    if ($versionLines.Count -ne 1) { throw 'candidate image version output is invalid' }
-    try { $runtime = [string]$versionLines[0] | ConvertFrom-Json -ErrorAction Stop }
+    $versionRecords = @($versionResult.Output)
+    if ($versionRecords.Count -lt 1) { throw 'candidate image version output is invalid' }
+    foreach ($record in $versionRecords) {
+        if ($null -eq $record -or $record -isnot [string] -or [string]$record -cmatch '[\x00-\x1f\x7f]') { throw 'candidate image version output is invalid' }
+    }
+    $versionJson = @($versionRecords) -join "`n"
+    if ($versionJson.Length -lt 2 -or [string]$versionJson[0] -cne '{' -or [string]$versionJson[$versionJson.Length - 1] -cne '}') { throw 'candidate image version JSON is invalid' }
+    try { $runtime = $versionJson | ConvertFrom-Json -ErrorAction Stop }
     catch { throw 'candidate image version output is invalid' }
+    Assert-GoalRouterExactProperties -Value $runtime -Names @('image_reference', 'image_revision', 'protocol_version', 'version') -Label 'candidate version'
+    if ($null -ne $runtime.image_reference) { throw 'candidate version image reference must be null' }
+    if ($runtime.image_revision -isnot [string] -or -not (Test-GoalRouterLifecycleSingleLine ([string]$runtime.image_revision))) { throw 'candidate version image revision is invalid' }
+    if ([string]$runtime.image_revision -cne $revision) { throw 'candidate version image revision does not match validated image label' }
+    $protocol = $runtime.protocol_version
+    $protocolType = if ($null -eq $protocol) { [TypeCode]::Empty } else { [Type]::GetTypeCode($protocol.GetType()) }
+    if ($protocolType -cnotin @([TypeCode]::SByte, [TypeCode]::Byte, [TypeCode]::Int16, [TypeCode]::UInt16, [TypeCode]::Int32, [TypeCode]::UInt32, [TypeCode]::Int64, [TypeCode]::UInt64)) { throw 'candidate protocol is invalid' }
+    if ([int64]$protocol -ne [int64]$Manifest.protocol_version) { throw 'candidate protocol does not match release manifest' }
+    if ($runtime.version -isnot [string] -or -not (Test-GoalRouterLifecycleSingleLine ([string]$runtime.version))) { throw 'candidate version is invalid' }
     if ([string]$runtime.version -cne [string]$Manifest.version) { throw 'candidate application version does not match release manifest' }
-    if ([int]$runtime.protocol_version -ne [int]$Manifest.protocol_version) { throw 'candidate protocol does not match release manifest' }
     return [pscustomobject]@{ RepoDigest = $repoDigest; ImageDigest = $actualDigest; Revision = $revision; Runtime = $runtime }
 }
 
