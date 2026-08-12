@@ -26,6 +26,13 @@ All notable changes to GoalRouter are recorded here.
   evidence. A command-scoped exact-worktree safe-directory exception supports read-only Docker
   mounts without wildcard trust.
 
+## [1.0.7] - 2026-08-12
+
+### Fixed
+
+- Validate only the exact Codex session files used by GoalRouter so unrelated Codex App
+  cache junctions do not prevent a safe existing-session install.
+
 ## [1.0.6] - 2026-08-12
 
 ### Fixed

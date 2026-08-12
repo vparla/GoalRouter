@@ -4,7 +4,7 @@
 
 # GoalRouter
 
-GoalRouter 1.0.6 is a local controller for routing engineering work through explicit,
+GoalRouter 1.0.7 is a local controller for routing engineering work through explicit,
 repository-neutral Codex policy. It inspects a target repository without executing its
 code, validates the signed-in account's model inventory, decomposes objectives into a
 dependency graph, runs bounded work with approval and authority controls, and stores
@@ -39,7 +39,7 @@ installed doctor check. Inspect the downloaded installer yourself before executi
 Run in Windows PowerShell:
 
 ```powershell
-$Version = '1.0.6'
+$Version = '1.0.7'
 $Release = "https://github.com/vparla/GoalRouter/releases/download/v$Version"
 Invoke-WebRequest "$Release/SHA256SUMS" -OutFile .\SHA256SUMS
 Invoke-WebRequest "$Release/install.ps1" -OutFile .\install.ps1
@@ -64,7 +64,7 @@ visible immediately.
 Run in a Linux POSIX shell with `sha256sum`:
 
 ```sh
-version=1.0.6
+version=1.0.7
 release="https://github.com/vparla/GoalRouter/releases/download/v$version"
 curl --fail-with-body --location --proto '=https' --tlsv1.2 "$release/SHA256SUMS" -o SHA256SUMS
 curl --fail-with-body --location --proto '=https' --tlsv1.2 "$release/install.sh" -o install.sh
@@ -76,7 +76,7 @@ grep " goalrouter-$version-unix.tar.gz$" SHA256SUMS > archive.SHA256SUMS
 sha256sum -c archive.SHA256SUMS
 tar -tzf "goalrouter-$version-unix.tar.gz"
 chmod 0700 install.sh
-./install.sh --version 1.0.6 --yes
+./install.sh --version 1.0.7 --yes
 ```
 
 ### macOS
@@ -84,7 +84,7 @@ chmod 0700 install.sh
 Run in a macOS POSIX shell with `shasum`:
 
 ```sh
-version=1.0.6
+version=1.0.7
 release="https://github.com/vparla/GoalRouter/releases/download/v$version"
 curl --fail-with-body --location --proto '=https' --tlsv1.2 "$release/SHA256SUMS" -o SHA256SUMS
 curl --fail-with-body --location --proto '=https' --tlsv1.2 "$release/install.sh" -o install.sh
@@ -96,7 +96,7 @@ grep " goalrouter-$version-unix.tar.gz$" SHA256SUMS > archive.SHA256SUMS
 shasum -a 256 -c archive.SHA256SUMS
 tar -tzf "goalrouter-$version-unix.tar.gz"
 chmod 0700 install.sh
-./install.sh --version 1.0.6 --yes
+./install.sh --version 1.0.7 --yes
 ```
 
 On either platform, add `$HOME/.local/bin` to PATH if the installer prints that

@@ -75,7 +75,7 @@ def test_live_compose_forwards_runtime_build_metadata() -> None:
     build_args = compose["x-cli-common"]["build"]["args"]
 
     assert build_args == {
-        "VERSION": "${VERSION:-1.0.6}",
+        "VERSION": "${VERSION:-1.0.7}",
         "REVISION": "${REVISION:-local}",
         "CREATED": "${CREATED:-1970-01-01T00:00:00Z}",
     }
