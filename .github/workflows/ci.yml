@@ -33,7 +33,7 @@ jobs:
           extra_args: --results=verified,unknown
       - name: Dependency review
         if: github.event_name == 'pull_request'
-        uses: actions/dependency-review-action@v4
+        uses: actions/dependency-review-action@v5
       - name: Check Dockerfile warnings
         run: docker compose build --check
       - name: Build declared verification images
