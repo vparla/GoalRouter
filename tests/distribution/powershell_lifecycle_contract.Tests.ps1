@@ -107,6 +107,24 @@ Invoke-Contract 'selected WSL distribution prefixes every native call exactly' {
     Assert-Throws { New-GoalRouterWslArguments -Distribution 'Ubuntu' -Arguments @() } 'native arguments are required' 'empty WSL command'
 }
 
+Invoke-Contract 'installer path conversion directly executes exact literal wslpath argv' {
+    $calls = [Collections.ArrayList]::new()
+    $native = {
+        param([string]$FilePath, [string[]]$Arguments, [bool]$CaptureOutput)
+        [void]$calls.Add([pscustomobject]@{ FilePath = $FilePath; Arguments = @($Arguments); CaptureOutput = $CaptureOutput })
+        return [pscustomobject]@{ ExitCode = 0; Output = @('/mnt/c/Work Trees/Stage! (one)/task-models.yaml') }
+    }.GetNewClosure()
+    $windowsPath = 'C:\Work Trees\Stage! (one)\task-models.yaml'
+
+    $translated = Convert-GoalRouterLifecyclePathToWsl -Path $windowsPath -Distribution 'Ubuntu-24.04' -NativeInvoker $native
+
+    Assert-Equal $translated '/mnt/c/Work Trees/Stage! (one)/task-models.yaml' 'translated installer path'
+    Assert-Equal $calls.Count 1 'one installer path conversion invocation'
+    Assert-Equal $calls[0].FilePath 'wsl.exe' 'installer path converter executable'
+    Assert-True $calls[0].CaptureOutput 'installer path converter captures output'
+    Assert-Equal $calls[0].Arguments @('-d', 'Ubuntu-24.04', '--exec', 'wslpath', '-a', '-u', '--', $windowsPath) 'installer direct-exec wslpath argv'
+}
+
 Invoke-Contract 'release URI validation is HTTPS or explicit loopback fixture only' {
     Assert-Equal (Assert-GoalRouterReleaseUri -Uri 'https://github.com/vparla/GoalRouter/releases/download/v1.0.0' -AllowLoopbackHttp $false).Scheme 'https' 'HTTPS release'
     Assert-Equal (Assert-GoalRouterReleaseUri -Uri 'http://127.0.0.1:8123/release' -AllowLoopbackHttp $true).Host '127.0.0.1' 'loopback fixture'

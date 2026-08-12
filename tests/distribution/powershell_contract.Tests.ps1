@@ -149,7 +149,7 @@ Invoke-Contract 'each literal path uses exact selected-distribution wslpath argv
     $translated = Resolve-GoalRouterPath -Path 'C:\Work Trees\Repo! (one)' -Kind Directory -Label project -Distribution 'Ubuntu-24.04'
     Assert-Equal $translated '/mnt/c/Work Trees/Repo! (one)' 'translated path'
     Assert-Equal $state.Calls.Count 1 'one translation invocation'
-    Assert-Equal $state.Calls[0].Arguments @('-d', 'Ubuntu-24.04', '--', 'wslpath', '-a', '-u', '--', 'C:\Work Trees\Repo! (one)') 'provider-native wslpath argv'
+    Assert-Equal $state.Calls[0].Arguments @('-d', 'Ubuntu-24.04', '--exec', 'wslpath', '-a', '-u', '--', 'C:\Work Trees\Repo! (one)') 'provider-native wslpath argv'
 }
 
 Invoke-Contract 'provider-native mapped UNC and wrong-kind paths fail before WSL' {

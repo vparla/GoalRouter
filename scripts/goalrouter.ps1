@@ -360,7 +360,7 @@ function Resolve-GoalRouterHostPath {
     if ($Kind -ceq 'File' -and -not $resolved.IsLeaf) { throw "$label file does not exist: $Path" }
 
     $windowsPath = $providerPath.Replace('/', '\')
-    $nativeArguments = @('-d', $Distribution, '--', 'wslpath', '-a', '-u', '--', $windowsPath)
+    $nativeArguments = @('-d', $Distribution, '--exec', 'wslpath', '-a', '-u', '--', $windowsPath)
     $nativeResult = Invoke-GoalRouterNative -FilePath 'wsl.exe' -Arguments $nativeArguments -CaptureOutput $true
     if ([int]$nativeResult.ExitCode -ne 0) { throw "wslpath failed for $label with exit code $($nativeResult.ExitCode)" }
     $output = @($nativeResult.Output)

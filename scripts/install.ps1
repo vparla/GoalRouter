@@ -1132,7 +1132,11 @@ function ConvertFrom-GoalRouterDockerArchitectureOutput {
 
 function Convert-GoalRouterLifecyclePathToWsl {
     param([string]$Path, [string]$Distribution, [scriptblock]$NativeInvoker)
-    $result = Invoke-GoalRouterLifecycleNative -NativeInvoker $NativeInvoker -Distribution $Distribution -Arguments @('wslpath', '-a', '-u', '--', $Path)
+    if (-not (Test-GoalRouterWslDistribution $Distribution)) { throw 'invalid WSL distribution' }
+    if ($null -eq $Path -or $Path.IndexOf([char]0) -ge 0) { throw 'native arguments contain an invalid value' }
+    $arguments = @('-d', $Distribution, '--exec', 'wslpath', '-a', '-u', '--', $Path)
+    $result = & $NativeInvoker -FilePath 'wsl.exe' -Arguments $arguments -CaptureOutput $true
+    if ([int]$result.ExitCode -ne 0) { throw "native prerequisite or candidate command failed with exit code $($result.ExitCode)" }
     $output = @($result.Output)
     if ($output.Count -ne 1 -or -not (Test-GoalRouterLifecyclePathText ([string]$output[0]))) { throw 'wslpath returned invalid output' }
     return [string]$output[0]

@@ -22,7 +22,7 @@ function New-FakeWslInvoker {
     $invoker = {
         param([string]$FilePath, [string[]]$Arguments, [bool]$CaptureOutput)
         [void]$State.Calls.Add([pscustomobject]@{ FilePath = $FilePath; Arguments = @($Arguments); CaptureOutput = $CaptureOutput })
-        $commandIndex = [Array]::IndexOf($Arguments, '--') + 1
+        $commandIndex = if ($Arguments.Count -gt 3 -and $Arguments[2] -ceq '--exec') { 3 } else { [Array]::IndexOf($Arguments, '--') + 1 }
         $command = $Arguments[$commandIndex]
         if ($command -eq 'wslpath') {
             $windowsPath = $Arguments[-1].Replace('\', '/')
