@@ -26,6 +26,13 @@ All notable changes to GoalRouter are recorded here.
   evidence. A command-scoped exact-worktree safe-directory exception supports read-only Docker
   mounts without wildcard trust.
 
+## [1.0.3] - 2026-08-12
+
+### Fixed
+
+- Parse Docker `RepoDigests` as a strict JSON array on Windows PowerShell 5.1 before
+  accepting the single repository-qualified release digest.
+
 ## [1.0.2] - 2026-08-12
 
 ### Fixed
