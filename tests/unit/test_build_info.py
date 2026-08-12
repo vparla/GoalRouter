@@ -13,7 +13,7 @@ def test_current_build_info_uses_stable_defaults_and_explicit_image_metadata() -
         }
     )
 
-    assert info.version == "1.0.0"
+    assert info.version == "1.0.1"
     assert info.protocol_version == 1
     assert info.image_reference is not None
     assert info.image_reference.endswith("@sha256:abc")

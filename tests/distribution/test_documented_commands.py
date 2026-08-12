@@ -15,9 +15,9 @@ from goalrouter.cli import build_parser
 
 ROOT = Path(__file__).resolve().parents[2]
 
-WINDOWS_INSTALL_COMMAND = r".\install.ps1 -Version 1.0.0 -Yes"
-LINUX_INSTALL_COMMAND = "./install.sh --version 1.0.0 --yes"
-MACOS_INSTALL_COMMAND = "./install.sh --version 1.0.0 --yes"
+WINDOWS_INSTALL_COMMAND = r".\install.ps1 -Version 1.0.1 -Yes"
+LINUX_INSTALL_COMMAND = "./install.sh --version 1.0.1 --yes"
+MACOS_INSTALL_COMMAND = "./install.sh --version 1.0.1 --yes"
 
 
 def _heading_block(content: str, heading: str) -> str:
@@ -55,8 +55,8 @@ def _assert_install_contract(content: str) -> None:
             "Get-Content .\\install.ps1",
             "$Checksums = Get-Content .\\SHA256SUMS",
             "foreach ($File in @('install.ps1', \"goalrouter-$Version-windows.zip\")) {",
-            "Expand-Archive -Path .\\goalrouter-1.0.0-windows.zip "
-            "-DestinationPath .\\goalrouter-1.0.0 -WhatIf",
+            'Expand-Archive -Path ".\\goalrouter-$Version-windows.zip" '
+            '-DestinationPath ".\\goalrouter-$Version" -WhatIf',
             WINDOWS_INSTALL_COMMAND,
         ),
     )
@@ -281,9 +281,9 @@ def test_documented_lifecycle_commands_match_platform_grammar() -> None:
 
     for commands in (readme, installation):
         assert {WINDOWS_INSTALL_COMMAND, LINUX_INSTALL_COMMAND} <= commands
-        assert r".\install.ps1 -Version 1.0.0" not in commands
-        assert "./install.sh --version 1.0.0" not in commands
-    assert {"goalrouter update", "goalrouter update 1.0.0"} <= upgrading
+        assert r".\install.ps1 -Version 1.0.1" not in commands
+        assert "./install.sh --version 1.0.1" not in commands
+    assert {"goalrouter update", "goalrouter update 1.0.1"} <= upgrading
     assert {
         "goalrouter uninstall",
         "goalrouter uninstall --yes",

@@ -63,10 +63,16 @@ provenance, pushes temporary commit-scoped images, prepares and verifies the exa
 multi-architecture index digest, builds deterministic release assets, verifies
 `SHA256SUMS`, publishes a temporary index, and creates a registry attestation for the final
 digest. Only then does it publish stable aliases `vX.Y.Z`, `X.Y.Z`, `X.Y`, `X`, and
-`latest`, recheck their digest, and create the GitHub Release.
+`latest`, recheck every alias against the prepared digest, and create the GitHub Release.
 
-The stable path refuses to overwrite an existing GHCR alias or GitHub Release. It is
-deliberately non-idempotent once public immutable names exist.
+The release tag, GitHub Release, and OCI aliases `vX.Y.Z` and `X.Y.Z` are immutable
+release names. The stable path refuses to overwrite or reuse them and is deliberately
+non-idempotent once any of those public names exist. OCI aliases `X.Y`, `X`, and `latest`
+are approved moving aliases. For a patch release, the workflow resolves the prior
+immutable patch image and advances the moving aliases only after proving that all three
+still resolve to that exact prior digest. A missing, malformed, unauthorized, unexpected,
+or divergent moving alias blocks publication; divergence is a release incident and must
+not be repaired by overwriting immutable evidence.
 
 ## Release assets
 
@@ -92,8 +98,8 @@ published digest, and perform an anonymous pull after clearing or isolating regi
 credentials:
 
 ```sh
-docker pull ghcr.io/vparla/goalrouter:1.0.0
-docker image inspect ghcr.io/vparla/goalrouter:1.0.0
+docker pull ghcr.io/vparla/goalrouter:1.0.1
+docker image inspect ghcr.io/vparla/goalrouter:1.0.1
 ```
 
 Also perform clean Windows and POSIX installer checks from downloaded assets. Confirm

@@ -43,7 +43,7 @@ else
         --quiet \
         --pull=false \
         --target runtime \
-        --build-arg VERSION=1.0.0 \
+        --build-arg VERSION=1.0.1 \
         --build-arg REVISION=posix-launcher-safety \
         --build-arg CREATED=1970-01-01T00:00:00Z \
         --label "$fixture_owner_label" \

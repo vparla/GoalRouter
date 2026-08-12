@@ -78,9 +78,9 @@ jobs:
           docker compose run --rm --no-deps \
             -v "$parent:/release" \
             release-assets \
-            --version 1.0.0 \
+            --version 1.0.1 \
             --tag "$GITHUB_REF_NAME" \
-            --image ghcr.io/vparla/goalrouter:1.0.0 \
+            --image ghcr.io/vparla/goalrouter:1.0.1 \
             --image-digest "sha256:0000000000000000000000000000000000000000000000000000000000000000" \
             --source-revision "$GITHUB_SHA" \
             --source-date-epoch "$source_date_epoch" \
@@ -119,7 +119,7 @@ jobs:
         run: |
           set -euo pipefail
           image=ghcr.io/vparla/goalrouter
-          version=1.0.0
+          version=1.0.1
           revision="$GITHUB_SHA"
           created=$(git show -s --format=%cI "$GITHUB_SHA")
           temporary_tag="$image:tmp-${GITHUB_SHA:0:12}-amd64"
@@ -181,7 +181,7 @@ jobs:
         run: |
           set -euo pipefail
           image=ghcr.io/vparla/goalrouter
-          version=1.0.0
+          version=1.0.1
           revision="$GITHUB_SHA"
           created=$(git show -s --format=%cI "$GITHUB_SHA")
           temporary_tag="$image:tmp-${GITHUB_SHA:0:12}-arm64"
@@ -285,12 +285,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          test "$GITHUB_REF_NAME" = v1.0.0
+          test "$GITHUB_REF_NAME" = v1.0.1
           registry_token=$(curl --fail-with-body --silent --show-error \
             --user "$GITHUB_ACTOR:$GH_TOKEN" \
             "https://ghcr.io/token?scope=repository:vparla/goalrouter:pull" \
             | jq -er '.token | strings | select(length > 0)')
-          for tag in v1.0.0 1.0.0 1.0 1 latest; do
+          for tag in v1.0.1 1.0.1; do
             status=$(curl --silent --show-error \
               --output "$RUNNER_TEMP/ghcr-$tag.json" \
               --write-out '%{http_code}' \
@@ -302,6 +302,37 @@ jobs:
               "404") ;;
               *) printf 'unexpected GHCR status for %s: %s\n' "$tag" "$status" >&2; exit 1 ;;
             esac
+          done
+          resolve_existing_digest() {
+            tag=$1
+            alias_kind=$2
+            headers="$RUNNER_TEMP/ghcr-$tag.headers"
+            status=$(curl --silent --show-error \
+              --dump-header "$headers" \
+              --output "$RUNNER_TEMP/ghcr-$tag.json" \
+              --write-out '%{http_code}' \
+              --header "Authorization: Bearer $registry_token" \
+              --header 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json' \
+              "https://ghcr.io/v2/vparla/goalrouter/manifests/$tag")
+            case "$status" in
+              "200") ;;
+              "404") printf '%s GHCR alias is missing: %s\n' "$alias_kind" "$tag" >&2; exit 1 ;;
+              *) printf 'unexpected GHCR status for %s: %s\n' "$tag" "$status" >&2; exit 1 ;;
+            esac
+            digest_count=$(sed -n 's/^[Dd]ocker-[Cc]ontent-[Dd]igest:[[:space:]]*\(sha256:[0-9a-f]\{64\}\)\r*$/\1/p' "$headers" | wc -l | tr -d '[:space:]')
+            test "$digest_count" = 1 || {
+              printf 'GHCR alias returned multiple digests or no valid OCI digest: %s\n' "$tag" >&2
+              exit 1
+            }
+            sed -n 's/^[Dd]ocker-[Cc]ontent-[Dd]igest:[[:space:]]*\(sha256:[0-9a-f]\{64\}\)\r*$/\1/p' "$headers"
+          }
+          prior_digest=$(resolve_existing_digest 1.0.0 prior-immutable)
+          for tag in 1.0 1 latest; do
+            moving_digest=$(resolve_existing_digest "$tag" moving)
+            test "$moving_digest" = "$prior_digest" || {
+              printf 'moving GHCR alias diverged from 1.0.0: %s\n' "$tag" >&2
+              exit 1
+            }
           done
           release_status=$(curl --silent --show-error \
             --output "$RUNNER_TEMP/github-release.json" \
@@ -321,7 +352,7 @@ jobs:
         run: |
           set -euo pipefail
           image=ghcr.io/vparla/goalrouter
-          test "$GITHUB_REF_NAME" = v1.0.0
+          test "$GITHUB_REF_NAME" = v1.0.1
           manifest_with_lf="$RUNNER_TEMP/stable-index-with-lf.json"
           manifest="$RUNNER_TEMP/stable-index.json"
           docker buildx imagetools create \
@@ -347,9 +378,9 @@ jobs:
           docker compose run --rm --no-deps \
             -v "$parent:/release" \
             release-assets \
-            --version 1.0.0 \
+            --version 1.0.1 \
             --tag "$GITHUB_REF_NAME" \
-            --image "$image:1.0.0" \
+            --image "$image:1.0.1" \
             --image-digest "${{ steps.index.outputs.digest }}" \
             --source-revision "$GITHUB_SHA" \
             --source-date-epoch "$source_date_epoch" \
@@ -384,8 +415,8 @@ jobs:
           image=ghcr.io/vparla/goalrouter
           metadata="$RUNNER_TEMP/stable-aliases.json"
           docker buildx imagetools create \
-            --tag "$image:v1.0.0" \
-            --tag "$image:1.0.0" \
+            --tag "$image:v1.0.1" \
+            --tag "$image:1.0.1" \
             --tag "$image:1.0" \
             --tag "$image:1" \
             --tag "$image:latest" \
@@ -394,6 +425,13 @@ jobs:
           aliased_digest=$(sed -n '/"containerimage.descriptor"/,/^[[:space:]]*}/ { s/.*"digest":[[:space:]]*"\(sha256:[0-9a-f]\{64\}\)".*/\1/p; }' "$metadata")
           [[ "$aliased_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
           test "$aliased_digest" = "${{ steps.index.outputs.digest }}"
+          for tag in v1.0.1 1.0.1 1.0 1 latest; do
+            published_alias_digest=$(docker buildx imagetools inspect \
+              "$image:$tag" \
+              --format '{{json .Manifest}}' \
+              | jq -er '.digest | strings | select(test("^sha256:[0-9a-f]{64}$"))')
+            test "$published_alias_digest" = "${{ steps.index.outputs.digest }}"
+          done
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -404,8 +442,8 @@ jobs:
             --verify-tag \
             --generate-notes \
             "$assets/SHA256SUMS" \
-            "$assets/goalrouter-1.0.0-unix.tar.gz" \
-            "$assets/goalrouter-1.0.0-windows.zip" \
+            "$assets/goalrouter-1.0.1-unix.tar.gz" \
+            "$assets/goalrouter-1.0.1-windows.zip" \
             "$assets/install.ps1" \
             "$assets/install.sh" \
             "$assets/release-manifest.json" \
