@@ -782,7 +782,7 @@ namespace GoalRouter {
             $cursor = $next
         }
         $pathSecurity = Get-GoalRouterWindowsPathSecurity -Path $ancestorProviderPath
-        return [pscustomobject]@{ Path = $Path; ProviderName = $resolved[0].Provider.Name; ProviderPath = $providerPath; AncestorProviderPath = $ancestorProviderPath; Exists = $exists; IsContainer = $exists -and (Test-Path -LiteralPath $providerPath -PathType Container); IsLeaf = $exists -and (Test-Path -LiteralPath $providerPath -PathType Leaf); IsReparsePoint = (($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0); ParentIsReparsePoint = $parentReparse; OwnerMatchesCurrentUser = [bool]$pathSecurity.OwnerMatchesCurrentUser; AclIsSafe = [bool]$pathSecurity.AclIsSafe; AncestorOwnerMatchesCurrentUser = [bool]$pathSecurity.OwnerMatchesCurrentUser; AncestorAclIsSafe = [bool]$pathSecurity.AclIsSafe; AncestorChainIsSafe = $ancestorChainIsSafe }
+        return [pscustomobject]@{ Path = $Path; ProviderName = $resolved[0].Provider.Name; ProviderPath = $providerPath; AncestorProviderPath = $ancestorProviderPath; Exists = $exists; IsContainer = $exists -and (Test-Path -LiteralPath $providerPath -PathType Container); IsLeaf = $exists -and (Test-Path -LiteralPath $providerPath -PathType Leaf); IsReparsePoint = (($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0); ParentIsReparsePoint = $parentReparse; OwnerMatchesCurrentUser = [bool]$pathSecurity.OwnerMatchesCurrentUser; OwnerIsTrusted = [bool]$pathSecurity.OwnerIsTrusted; AclIsSafe = [bool]$pathSecurity.AclIsSafe; AncestorOwnerMatchesCurrentUser = [bool]$pathSecurity.OwnerMatchesCurrentUser; AncestorAclIsSafe = [bool]$pathSecurity.AclIsSafe; AncestorChainIsSafe = $ancestorChainIsSafe }
     }
     $newWorkDirectory = {
         $createWorkDirectory = { param([string]$Path); if (Test-Path -LiteralPath $Path) { throw 'temporary staging directory collision' }; [void][IO.Directory]::CreateDirectory($Path) }
@@ -1008,7 +1008,7 @@ function Assert-GoalRouterWindowsRuntime {
 }
 
 function Assert-GoalRouterLifecyclePathInfo {
-    param([Parameter(Mandatory = $true)]$Info, [Parameter(Mandatory = $true)][string]$Label, [bool]$AllowMissing, [string[]]$ProtectedRoots, [ValidateSet('Directory', 'File')][string]$RequiredKind = 'Directory')
+    param([Parameter(Mandatory = $true)]$Info, [Parameter(Mandatory = $true)][string]$Label, [bool]$AllowMissing, [string[]]$ProtectedRoots, [ValidateSet('Directory', 'File')][string]$RequiredKind = 'Directory', [ValidateSet('CurrentUser', 'TrustedPrincipal')][string]$RequiredOwner = 'CurrentUser')
     $path = [string]$Info.Path
     if (-not (Test-GoalRouterLifecyclePathText $path) -or $path.StartsWith('\\') -or $path -cnotmatch '\A[A-Za-z]:[\\/]') { throw "$Label must be an absolute local FileSystem path" }
     if ($path -match '(?:\A|[\\/])\.\.?(?:[\\/]|\z)') { throw "$Label must not contain dot path segments" }
@@ -1029,7 +1029,8 @@ function Assert-GoalRouterLifecyclePathInfo {
     if (-not [bool]$Info.Exists -and -not $AllowMissing) { throw "$Label does not exist" }
     if (-not [bool]$Info.Exists -and $Info.PSObject.Properties.Name -contains 'AncestorOwnerMatchesCurrentUser' -and -not [bool]$Info.AncestorOwnerMatchesCurrentUser) { throw "$Label nearest existing ancestor is not owned by the current user" }
     if (-not [bool]$Info.Exists -and $Info.PSObject.Properties.Name -contains 'AncestorAclIsSafe' -and -not [bool]$Info.AncestorAclIsSafe) { throw "$Label nearest existing ancestor ACL is unsafe" }
-    if ([bool]$Info.Exists -and $Info.PSObject.Properties.Name -contains 'OwnerMatchesCurrentUser' -and -not [bool]$Info.OwnerMatchesCurrentUser) { throw "$Label is not owned by the current user" }
+    if ([bool]$Info.Exists -and $RequiredOwner -ceq 'CurrentUser' -and $Info.PSObject.Properties.Name -contains 'OwnerMatchesCurrentUser' -and -not [bool]$Info.OwnerMatchesCurrentUser) { throw "$Label is not owned by the current user" }
+    if ([bool]$Info.Exists -and $RequiredOwner -ceq 'TrustedPrincipal' -and ($Info.PSObject.Properties.Name -notcontains 'OwnerIsTrusted' -or -not [bool]$Info.OwnerIsTrusted)) { throw "$Label is not owned by a trusted principal" }
     if ([bool]$Info.Exists -and $Info.PSObject.Properties.Name -contains 'AclIsSafe' -and -not [bool]$Info.AclIsSafe) { throw "$Label ACL is unsafe" }
     if ([bool]$Info.Exists -and $RequiredKind -ceq 'Directory' -and -not [bool]$Info.IsContainer) { throw "$Label must be a directory" }
     if ([bool]$Info.Exists -and $RequiredKind -ceq 'File' -and -not [bool]$Info.IsLeaf) { throw "$Label must be a regular file" }
@@ -1037,7 +1038,7 @@ function Assert-GoalRouterLifecyclePathInfo {
 
 function Assert-GoalRouterHostRoot {
     param([Parameter(Mandatory = $true)]$Info, [Parameter(Mandatory = $true)][string]$Label)
-    Assert-GoalRouterLifecyclePathInfo -Info $Info -Label $Label -AllowMissing $false -ProtectedRoots @() -RequiredKind 'Directory'
+    Assert-GoalRouterLifecyclePathInfo -Info $Info -Label $Label -AllowMissing $false -ProtectedRoots @() -RequiredKind 'Directory' -RequiredOwner 'TrustedPrincipal'
 }
 
 function New-GoalRouterTrustedWorkDirectory {
@@ -1050,12 +1051,12 @@ function New-GoalRouterTrustedWorkDirectory {
     )
     if ($null -eq $NewNamePort) { $NewNamePort = { 'goalrouter-install-' + [guid]::NewGuid().ToString('N') } }
     $rootInfo = & $ResolvePathPort -Path $TempRoot -Kind 'Directory' -AllowMissing $false
-    Assert-GoalRouterHostRoot -Info $rootInfo -Label 'temporary staging root'
+    Assert-GoalRouterLifecyclePathInfo -Info $rootInfo -Label 'temporary staging root' -AllowMissing $false -ProtectedRoots @() -RequiredKind 'Directory'
     $path = Join-GoalRouterWindowsPath $TempRoot (& $NewNamePort)
     try {
         & $CreateDirectoryPort -Path $path
         $workInfo = & $ResolvePathPort -Path $path -Kind 'Directory' -AllowMissing $false
-        Assert-GoalRouterHostRoot -Info $workInfo -Label 'temporary staging directory'
+        Assert-GoalRouterLifecyclePathInfo -Info $workInfo -Label 'temporary staging directory' -AllowMissing $false -ProtectedRoots @() -RequiredKind 'Directory'
         return $path
     } catch {
         $failure = $_
@@ -1237,7 +1238,8 @@ function Invoke-GoalRouterWindowsInstall {
     }
 
     $kernel = Invoke-GoalRouterLifecycleNative -NativeInvoker $nativePort -Distribution $Options.WslDistribution -Arguments @('uname', '-r')
-    if (@($kernel.Output).Count -ne 1 -or [string]$kernel.Output[0] -notmatch 'WSL2') { throw 'selected WSL distribution is not ready under WSL2' }
+    $kernelOutput = @($kernel.Output)
+    if ($kernelOutput.Count -ne 1 -or -not (Test-GoalRouterLifecyclePathText ([string]$kernelOutput[0])) -or [string]$kernelOutput[0] -cnotmatch '\A[0-9]+(?:\.[0-9]+){1,3}-[A-Za-z0-9._+-]*WSL2\z') { throw 'selected WSL distribution is not ready under WSL2' }
     $wslVersion = Get-GoalRouterWslVersion -Distribution $Options.WslDistribution -NativeInvoker $nativePort
     $dockerVersionsResult = Invoke-GoalRouterLifecycleNative -NativeInvoker $nativePort -Distribution $Options.WslDistribution -Arguments @('docker', 'version', '--format', '{{.Client.Version}} {{.Server.Version}}')
     $dockerVersionFields = @(ConvertFrom-GoalRouterDockerVersionOutput -Output @($dockerVersionsResult.Output))

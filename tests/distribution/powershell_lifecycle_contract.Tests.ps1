@@ -659,6 +659,7 @@ function New-FullInstallerFixture {
         Revision = '0123456789abcdef'
         DoctorExitCode = 0
         FailDockerVersion = $false
+        KernelOutput = @('5.15.153-microsoft-standard-WSL2')
         ThrowRemovePath = $null
         ResolveOverrides = @{}
         Removals = [System.Collections.ArrayList]::new()
@@ -672,7 +673,7 @@ function New-FullInstallerFixture {
         [void]$fixture.Calls.Add("resolve:${Kind}:$Path")
         if ($fixture.ResolveOverrides.ContainsKey($Path)) { return $fixture.ResolveOverrides[$Path] }
         $exists = $fixture.Files.ContainsKey($Path) -or $fixture.Directories.Contains($Path) -or $Path -in @('D:\Codex', 'D:\Project')
-        return [pscustomobject]@{ Path = $Path; ProviderName = 'FileSystem'; ProviderPath = $Path; Exists = $exists; IsContainer = $Kind -ceq 'Directory'; IsLeaf = $Kind -ceq 'File'; IsReparsePoint = $false; ParentIsReparsePoint = $false; OwnerMatchesCurrentUser = $true; AclIsSafe = $true; AncestorChainIsSafe = $true }
+        return [pscustomobject]@{ Path = $Path; ProviderName = 'FileSystem'; ProviderPath = $Path; Exists = $exists; IsContainer = $Kind -ceq 'Directory'; IsLeaf = $Kind -ceq 'File'; IsReparsePoint = $false; ParentIsReparsePoint = $false; OwnerMatchesCurrentUser = $true; OwnerIsTrusted = $true; AclIsSafe = $true; AncestorChainIsSafe = $true }
     }.GetNewClosure()
     $newWork = { return 'C:\Temp\goalrouter-random-stage' }.GetNewClosure()
     $resolveLatest = { return [string]$fixture.Version }.GetNewClosure()
@@ -709,7 +710,7 @@ function New-FullInstallerFixture {
             if ($fixture.FailDockerVersion) { return [pscustomobject]@{ ExitCode = 7; Output = @('daemon unavailable') } }
             return [pscustomobject]@{ ExitCode = 0; Output = @('28.3.3 28.3.3') }
         }
-        if ($joined -match ' uname -r') { return [pscustomobject]@{ ExitCode = 0; Output = @('5.15.153-microsoft-standard-WSL2') } }
+        if ($joined -match ' uname -r') { return [pscustomobject]@{ ExitCode = 0; Output = $fixture.KernelOutput } }
         if ($joined -match ' wslinfo --wsl-version') { return [pscustomobject]@{ ExitCode = 0; Output = @('2.3.24') } }
         if ($joined -match ' docker info ') { return [pscustomobject]@{ ExitCode = 0; Output = @('x86_64') } }
         if ($joined -match ' docker pull ') { return [pscustomobject]@{ ExitCode = 0; Output = @() } }
@@ -819,6 +820,36 @@ Invoke-Contract 'unsafe host profile and AppData roots fail before native produc
         Assert-Equal $fixture.State.Mutations.Count 0 "$($case.Label) rejects before product mutation"
         Assert-Equal $fixture.State.UserPath.Value 'C:\Tools' "$($case.Label) rejects before PATH mutation"
     }
+}
+
+Invoke-Contract 'trusted SYSTEM host root is accepted while an untrusted owner is rejected' {
+    $fixture = New-FullInstallerFixture
+    $trustedRoot = [pscustomobject]@{ Path = 'C:\Users\Me'; ProviderName = 'FileSystem'; ProviderPath = 'C:\Users\Me'; Exists = $true; IsContainer = $true; IsLeaf = $false; IsReparsePoint = $false; ParentIsReparsePoint = $false; OwnerMatchesCurrentUser = $false; OwnerIsTrusted = $true; AclIsSafe = $true; AncestorChainIsSafe = $true }
+    $fixture.State.ResolveOverrides['C:\Users\Me'] = $trustedRoot
+    Invoke-GoalRouterWindowsInstall -Options (New-FullInstallOptions) -Ports $fixture.Ports
+    Assert-True (@($fixture.State.Calls | Where-Object { $_ -isnot [string] -and ($_.Arguments -join ' ') -match ' wslinfo --wsl-version' }).Count -eq 1) 'trusted SYSTEM root reaches WSL version prerequisite'
+    $untrustedRoot = $trustedRoot.PSObject.Copy()
+    $untrustedRoot.OwnerIsTrusted = $false
+    $untrustedFixture = New-FullInstallerFixture
+    $untrustedFixture.State.ResolveOverrides['C:\Users\Me'] = $untrustedRoot
+    Assert-Throws { Invoke-GoalRouterWindowsInstall -Options (New-FullInstallOptions) -Ports $untrustedFixture.Ports } 'trusted principal' 'untrusted host root is rejected'
+}
+
+Invoke-Contract 'scalar WSL2 kernel output reaches later WSL and Docker prerequisites' {
+    $fixture = New-FullInstallerFixture
+    $fixture.State.KernelOutput = '5.15.153-microsoft-standard-WSL2'
+    Invoke-GoalRouterWindowsInstall -Options (New-FullInstallOptions) -Ports $fixture.Ports
+    $nativeCalls = @($fixture.State.Calls | Where-Object { $_ -isnot [string] })
+    Assert-True (@($nativeCalls | Where-Object { ($_.Arguments -join ' ') -match ' wslinfo --wsl-version' }).Count -eq 1) 'scalar WSL2 output reaches WSL version prerequisite'
+    Assert-True (@($nativeCalls | Where-Object { ($_.Arguments -join ' ') -match ' docker version ' }).Count -eq 1) 'scalar WSL2 output reaches Docker version prerequisite'
+    foreach ($malformedOutput in @('not-a-kernel-WSL2', '5.15.153-microsoft-standard-WSL1', "5.15.153-microsoft-standard-WSL2`nextra", "5.15.153-microsoft-standard-WSL2`textra")) {
+        $malformedFixture = New-FullInstallerFixture
+        $malformedFixture.State.KernelOutput = $malformedOutput
+        Assert-Throws { Invoke-GoalRouterWindowsInstall -Options (New-FullInstallOptions) -Ports $malformedFixture.Ports } 'not ready under WSL2' 'malformed kernel output is rejected'
+    }
+    $multipleLineFixture = New-FullInstallerFixture
+    $multipleLineFixture.State.KernelOutput = @('5.15.153-microsoft-standard-WSL2', 'extra')
+    Assert-Throws { Invoke-GoalRouterWindowsInstall -Options (New-FullInstallOptions) -Ports $multipleLineFixture.Ports } 'not ready under WSL2' 'multiple kernel output lines are rejected'
 }
 
 Invoke-Contract 'Win32-invalid and reserved custom destination components fail before native or mutation' {
@@ -1443,10 +1474,12 @@ Invoke-Contract 'directory-chain creation rolls back its own partial failure' {
 
 Invoke-Contract 'temporary staging root and created workdir are trusted before download use' {
     $events = [System.Collections.ArrayList]::new()
-    $safeInfo = { param([string]$Path); [pscustomobject]@{ Path = $Path; ProviderName = 'FileSystem'; ProviderPath = $Path; Exists = $true; IsContainer = $true; IsLeaf = $false; IsReparsePoint = $false; ParentIsReparsePoint = $false; OwnerMatchesCurrentUser = $true; AclIsSafe = $true; AncestorChainIsSafe = $true } }
+    $safeInfo = { param([string]$Path); [pscustomobject]@{ Path = $Path; ProviderName = 'FileSystem'; ProviderPath = $Path; Exists = $true; IsContainer = $true; IsLeaf = $false; IsReparsePoint = $false; ParentIsReparsePoint = $false; OwnerMatchesCurrentUser = $true; OwnerIsTrusted = $true; AclIsSafe = $true; AncestorChainIsSafe = $true } }
     $resolve = { param([string]$Path, [string]$Kind, [bool]$AllowMissing); & $safeInfo $Path }.GetNewClosure()
     $created = New-GoalRouterTrustedWorkDirectory -TempRoot 'D:\SafeTemp' -ResolvePathPort $resolve -CreateDirectoryPort { param([string]$Path); [void]$events.Add("create:$Path") } -RemoveDirectoryPort { param([string]$Path); [void]$events.Add("remove:$Path") } -NewNamePort { 'goalrouter-install-fixed' }
     Assert-Equal $created 'D:\SafeTemp\goalrouter-install-fixed' 'trusted staging path'
+    $foreignOwner = { param([string]$Path); [pscustomobject]@{ Path = $Path; ProviderName = 'FileSystem'; ProviderPath = $Path; Exists = $true; IsContainer = $true; IsLeaf = $false; IsReparsePoint = $false; ParentIsReparsePoint = $false; OwnerMatchesCurrentUser = $false; OwnerIsTrusted = $true; AclIsSafe = $true; AncestorChainIsSafe = $true } }
+    Assert-Throws { New-GoalRouterTrustedWorkDirectory -TempRoot 'D:\ForeignTemp' -ResolvePathPort $foreignOwner -CreateDirectoryPort { throw 'must not create' } -RemoveDirectoryPort { param([string]$Path) } -NewNamePort { 'goalrouter-install-fixed' } } 'owned by the current user' 'trusted non-user staging root is rejected'
     $unsafeResolve = { param([string]$Path, [string]$Kind, [bool]$AllowMissing); $info = & $safeInfo $Path; $info.ProviderPath = 'D:\Redirected'; $info.IsReparsePoint = $true; return $info }.GetNewClosure()
     Assert-Throws { New-GoalRouterTrustedWorkDirectory -TempRoot 'D:\UnsafeTemp' -ResolvePathPort $unsafeResolve -CreateDirectoryPort { throw 'must not create' } -RemoveDirectoryPort { param([string]$Path) } -NewNamePort { 'goalrouter-install-fixed' } } 'provider|reparse' 'redirected staging root'
     Assert-Equal @($events | Where-Object { $_ -like 'create:*' }).Count 1 'unsafe staging root creates nothing'
