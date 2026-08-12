@@ -544,9 +544,18 @@ function Test-GoalRouterCandidateImage {
     $expectedArchitecture = if ($Platform -ceq 'linux/amd64') { 'amd64' } elseif ($Platform -ceq 'linux/arm64') { 'arm64' } else { throw 'unsupported Windows runtime platform' }
     $architecture = @($architectureResult.Output)
     if ($architecture.Count -ne 1 -or [string]$architecture[0] -cne $expectedArchitecture) { throw 'candidate image platform does not match trusted release manifest' }
-    $revisionResult = Invoke-GoalRouterLifecycleNative -NativeInvoker $NativeInvoker -Distribution $Distribution -Arguments @('docker', 'image', 'inspect', '--format', '{{index .Config.Labels "org.opencontainers.image.revision"}}', $repoDigest)
-    $revisions = @($revisionResult.Output)
-    if ($revisions.Count -ne 1 -or [string]$revisions[0] -cne [string]$Manifest.source_revision) { throw 'candidate image revision does not match trusted release manifest' }
+    $labelResult = Invoke-GoalRouterLifecycleNative -NativeInvoker $NativeInvoker -Distribution $Distribution -Arguments @('docker', 'image', 'inspect', '--format', '{{json .Config.Labels}}', $repoDigest)
+    $labelOutput = @($labelResult.Output)
+    if ($labelOutput.Count -ne 1) { throw 'candidate image label output is invalid' }
+    $labelJson = [string]$labelOutput[0]
+    if ($labelJson -cnotmatch '\A\{.*\}\z') { throw 'candidate image label JSON is invalid' }
+    try { $labels = $labelJson | ConvertFrom-Json -ErrorAction Stop }
+    catch { throw 'candidate image label JSON is invalid' }
+    $revisionName = 'org.opencontainers.image.revision'
+    $revisionProperties = @($labels.PSObject.Properties | Where-Object { [string]$_.Name -ceq $revisionName })
+    if ($revisionProperties.Count -ne 1 -or $revisionProperties[0].Value -isnot [string] -or -not (Test-GoalRouterLifecycleSingleLine ([string]$revisionProperties[0].Value))) { throw 'candidate image revision label is invalid' }
+    $revision = [string]$revisionProperties[0].Value
+    if ($revision -cne [string]$Manifest.source_revision) { throw 'candidate image revision does not match trusted release manifest' }
     $versionResult = Invoke-GoalRouterLifecycleNative -NativeInvoker $NativeInvoker -Distribution $Distribution -Arguments @('docker', 'run', '--rm', '--read-only', '--tmpfs', '/tmp:rw,exec,nosuid,size=64m,mode=1777', $repoDigest, '--json', 'version')
     $versionLines = @($versionResult.Output)
     if ($versionLines.Count -ne 1) { throw 'candidate image version output is invalid' }
@@ -554,7 +563,7 @@ function Test-GoalRouterCandidateImage {
     catch { throw 'candidate image version output is invalid' }
     if ([string]$runtime.version -cne [string]$Manifest.version) { throw 'candidate application version does not match release manifest' }
     if ([int]$runtime.protocol_version -ne [int]$Manifest.protocol_version) { throw 'candidate protocol does not match release manifest' }
-    return [pscustomobject]@{ RepoDigest = $repoDigest; ImageDigest = $actualDigest; Revision = [string]$revisions[0]; Runtime = $runtime }
+    return [pscustomobject]@{ RepoDigest = $repoDigest; ImageDigest = $actualDigest; Revision = $revision; Runtime = $runtime }
 }
 
 function Get-GoalRouterWindowsPathSecurity {
