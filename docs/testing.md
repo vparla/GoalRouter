@@ -107,8 +107,9 @@ must still pass with the pinned helper authority.
 The pinned `powershell-test` service runs PowerShell 7.5 on Linux. It dot-sources and
 executes the Windows scripts through structural and contract coverage, including
 PowerShell syntax, argument parsing, path/ACL abstractions, lifecycle transactions,
-launcher parity, and failure cases. Public v1.0.10 additionally passed one native Windows
-PowerShell 5.1 lifecycle using checksummed release assets: install, version, configuration
+launcher parity, and failure cases. One native live run under Windows PowerShell 5.1
+against public v1.0.10 additionally passed a lifecycle using checksummed release assets:
+install, version, configuration
 validation, account-skipped doctor, idempotent reinstall, preserve uninstall, reinstall,
 and purge uninstall. That evidence proves the native installation lifecycle; it does not
 replace the separate readonly-plan and documented-update acceptance requirements.
