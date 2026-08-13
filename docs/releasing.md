@@ -101,8 +101,8 @@ published digest, and perform an anonymous pull after clearing or isolating regi
 credentials:
 
 ```sh
-docker pull ghcr.io/vparla/goalrouter:1.0.8
-docker image inspect ghcr.io/vparla/goalrouter:1.0.8
+docker pull ghcr.io/vparla/goalrouter:1.0.9
+docker image inspect ghcr.io/vparla/goalrouter:1.0.9
 ```
 
 Also perform clean Windows and POSIX installer checks from downloaded assets. Confirm

@@ -35,9 +35,9 @@ import zipfile
 from pathlib import Path
 from typing import NoReturn
 
-VERSION = "1.0.8"
+VERSION = "1.0.9"
 PROTOCOL_VERSION = 1
-IMAGE = "ghcr.io/vparla/goalrouter:1.0.8"
+IMAGE = "ghcr.io/vparla/goalrouter:1.0.9"
 ARCHITECTURES = ["linux/amd64", "linux/arm64"]
 MINIMUM_HOSTS = {
     "windows": "10.0.19045",
@@ -63,8 +63,8 @@ RAW_ASSETS = {
     "uninstall.sh": "scripts/uninstall.sh",
 }
 CHECKSUM_ORDER = [
-    "goalrouter-1.0.8-unix.tar.gz",
-    "goalrouter-1.0.8-windows.zip",
+    "goalrouter-1.0.9-unix.tar.gz",
+    "goalrouter-1.0.9-windows.zip",
     "install.ps1",
     "install.sh",
     "release-manifest.json",

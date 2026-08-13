@@ -26,6 +26,13 @@ All notable changes to GoalRouter are recorded here.
   evidence. A command-scoped exact-worktree safe-directory exception supports read-only Docker
   mounts without wildcard trust.
 
+## [1.0.9] - 2026-08-12
+
+### Fixed
+
+- Make the installed Windows uninstaller self-contained so uninstall and purge work in a
+  fresh PowerShell process.
+
 ## [1.0.8] - 2026-08-12
 
 ### Fixed
