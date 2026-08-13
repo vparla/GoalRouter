@@ -170,8 +170,16 @@ function New-GoalRouterBootstrapFileSnapshot {
 
 function Restore-GoalRouterBootstrapFileSnapshot {
     param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)]$Snapshot)
-    if (Test-Path -LiteralPath $Path) { throw 'bootstrap recovery file target is unexpectedly occupied' }
-    [IO.File]::WriteAllBytes($Path, [Convert]::FromBase64String([string]$Snapshot.Bytes))
+    $bytes = [Convert]::FromBase64String([string]$Snapshot.Bytes)
+    $stream = $null
+    try {
+        try { $stream = [IO.File]::Open($Path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None) }
+        catch { throw [IO.IOException]::new('bootstrap recovery create-only claim failed for an occupied or unsafe target', $_.Exception) }
+        $stream.Write($bytes, 0, $bytes.Length)
+        $stream.Flush($true)
+    } finally {
+        if ($null -ne $stream) { $stream.Dispose() }
+    }
     [IO.File]::SetAttributes($Path, [IO.FileAttributes][int]$Snapshot.Attributes)
     $security = [Security.AccessControl.FileSecurity]::new()
     $security.SetSecurityDescriptorSddlForm([string]$Snapshot.SecurityDescriptorSddl, [Security.AccessControl.AccessControlSections]::All)
@@ -181,16 +189,26 @@ function Restore-GoalRouterBootstrapFileSnapshot {
 function New-GoalRouterBootstrapDirectorySnapshot {
     param([Parameter(Mandatory = $true)][string]$Path)
     $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
+    $parent = Split-Path -Parent $Path
+    $normalize = { param([string]$Value); $Value.Replace('/', '\').TrimEnd('\') }
+    $resolvedParent = @(Resolve-Path -LiteralPath $parent -ErrorAction Stop)
+    if ($resolvedParent.Count -ne 1 -or [string]$resolvedParent[0].Provider.Name -cne 'FileSystem' -or (& $normalize ([string]$resolvedParent[0].ProviderPath)) -ine (& $normalize $parent) -or -not (Test-Path -LiteralPath $parent -PathType Container)) { throw 'bootstrap directory snapshot parent is unsafe' }
+    $parentAttributes = [int][IO.File]::GetAttributes($parent)
+    if (($parentAttributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'bootstrap directory snapshot parent is a reparse point' }
+    $parentAcl = Get-Acl -LiteralPath $parent -ErrorAction Stop
     return [pscustomobject]@{
         Present = $true
         Attributes = [int][IO.File]::GetAttributes($Path)
         SecurityDescriptorSddl = $acl.GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::All)
+        ParentAttributes = $parentAttributes
+        ParentSecurityDescriptorSddl = $parentAcl.GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::All)
     }
 }
 
 function Restore-GoalRouterBootstrapDirectorySnapshot {
-    param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)]$Snapshot)
-    if (Test-Path -LiteralPath $Path) {
+    param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)]$Snapshot, [bool]$RequireCreate)
+    if (-not $RequireCreate) {
+        if (-not (Test-Path -LiteralPath $Path)) { throw 'required existing bootstrap recovery directory is missing' }
         [void](Assert-GoalRouterBootstrapPhysicalDirectory -Path $Path -ExpectedPath $Path -AllowedEntries @(Get-ChildItem -LiteralPath $Path -Force -ErrorAction Stop | ForEach-Object { $_.Name }))
         $currentAttributes = [int][IO.File]::GetAttributes($Path)
         $currentAcl = Get-Acl -LiteralPath $Path -ErrorAction Stop
@@ -198,7 +216,17 @@ function Restore-GoalRouterBootstrapDirectorySnapshot {
         if ($currentAttributes -ne [int]$Snapshot.Attributes -or $currentSddl -cne [string]$Snapshot.SecurityDescriptorSddl) { throw 'bootstrap recovery directory security or attributes changed' }
         return
     }
-    [void][IO.Directory]::CreateDirectory($Path)
+    $parent = Split-Path -Parent $Path
+    $normalize = { param([string]$Value); $Value.Replace('/', '\').TrimEnd('\') }
+    $resolvedParent = @(Resolve-Path -LiteralPath $parent -ErrorAction Stop)
+    if ($resolvedParent.Count -ne 1 -or [string]$resolvedParent[0].Provider.Name -cne 'FileSystem' -or (& $normalize ([string]$resolvedParent[0].ProviderPath)) -ine (& $normalize $parent) -or -not (Test-Path -LiteralPath $parent -PathType Container)) { throw 'bootstrap recovery directory parent is unsafe' }
+    $currentParentAttributes = [int][IO.File]::GetAttributes($parent)
+    if (($currentParentAttributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'bootstrap recovery directory parent is a reparse point' }
+    $currentParentAcl = Get-Acl -LiteralPath $parent -ErrorAction Stop
+    $currentParentSddl = $currentParentAcl.GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::All)
+    if ($currentParentAttributes -ne [int]$Snapshot.ParentAttributes -or $currentParentSddl -cne [string]$Snapshot.ParentSecurityDescriptorSddl) { throw 'bootstrap recovery directory parent security or attributes changed' }
+    try { [void](New-Item -ItemType Directory -Path $Path -ErrorAction Stop) }
+    catch { throw [IO.IOException]::new('bootstrap recovery directory create-only claim failed for an occupied or unsafe target', $_.Exception) }
     [IO.File]::SetAttributes($Path, [IO.FileAttributes][int]$Snapshot.Attributes)
     $security = [Security.AccessControl.DirectorySecurity]::new()
     $security.SetSecurityDescriptorSddlForm([string]$Snapshot.SecurityDescriptorSddl, [Security.AccessControl.AccessControlSections]::All)
@@ -218,6 +246,7 @@ function Invoke-GoalRouterTerminalCleanupWithRecovery {
         [Parameter(Mandatory = $true)][scriptblock]$RestoreDirectoryPort
     )
     $removedFiles = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $removedDirectories = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     try {
         foreach ($path in @($ControlFiles)) {
             if ([string]::IsNullOrEmpty([string]$path)) { continue }
@@ -232,16 +261,18 @@ function Invoke-GoalRouterTerminalCleanupWithRecovery {
         foreach ($path in @($TerminalDirectories)) {
             if ([string]::IsNullOrEmpty([string]$path)) { continue }
             & $RemoveDirectoryPort -Path ([string]$path)
+            [void]$removedDirectories.Add([string]$path)
         }
     } catch {
         $failure = $_
         $recoveryFailures = [Collections.ArrayList]::new()
         $directoryRecoveryFailed = $false
         foreach ($record in @($DirectoryRecovery)) {
-            try { & $RestoreDirectoryPort -Record $record }
+            try { & $RestoreDirectoryPort -Record $record -RequireCreate ($removedDirectories.Contains([string]$record.Path)) }
             catch {
                 $directoryRecoveryFailed = $true
                 [void]$recoveryFailures.Add($_.Exception.Message)
+                break
             }
         }
         if (-not $directoryRecoveryFailed) {
@@ -299,7 +330,7 @@ try {
         $bootstrapRemoveFile = { param([string]$Path); Remove-Item -LiteralPath $Path -ErrorAction Stop }
         $bootstrapRemoveDirectory = { param([string]$Path); [IO.Directory]::Delete($Path, $false) }
         $bootstrapRestoreFile = { param($Record); Restore-GoalRouterBootstrapFileSnapshot -Path ([string]$Record.Path) -Snapshot $Record.Snapshot }
-        $bootstrapRestoreDirectory = { param($Record); Restore-GoalRouterBootstrapDirectorySnapshot -Path ([string]$Record.Path) -Snapshot $Record.Snapshot }
+        $bootstrapRestoreDirectory = { param($Record, [bool]$RequireCreate); Restore-GoalRouterBootstrapDirectorySnapshot -Path ([string]$Record.Path) -Snapshot $Record.Snapshot -RequireCreate $RequireCreate }
         Invoke-GoalRouterTerminalCleanupWithRecovery -ControlFiles @($resolvedSelfTarget) -TerminalFiles $(if ($sentinelPresent -and -not $retainsNestedState) { @($resolvedSentinelTarget) } else { @() }) -TerminalDirectories (@($resolvedBinTarget) + $(if ($retainsNestedState) { @() } else { @($resolvedRootTarget) })) -FileRecovery $bootstrapFileRecovery -DirectoryRecovery $bootstrapDirectoryRecovery -RemoveFilePort $bootstrapRemoveFile -RemoveDirectoryPort $bootstrapRemoveDirectory -RestoreFilePort $bootstrapRestoreFile -RestoreDirectoryPort $bootstrapRestoreDirectory
         [Console]::Out.WriteLine('GoalRouter final uninstaller cleanup completed')
         exit 0
@@ -475,7 +506,7 @@ function Invoke-GoalRouterUninstallCommit {
     $removeFilePort = $Ports.RemoveFile
     $removeTreePort = $Ports.RemoveTree
     $removeDirectoryPort = $Ports.RemoveDirectory
-    $restorePort = $Ports.Restore
+    $restoreFileCreateOnlyPort = $Ports.RestoreFileCreateOnly
     $restoreDirectoryPort = $Ports.RestoreDirectory
     $setPathPort = $Ports.SetUserPath
     $writeJournal = {
@@ -505,11 +536,9 @@ function Invoke-GoalRouterUninstallCommit {
     }
     $restoreFileRecord = {
         param($Record)
-        $current = & $snapshotPort -Path ([string]$Record.Path)
-        if ($current.Present) { throw "terminal recovery file target is unexpectedly occupied: $($Record.Path)" }
-        if ($Record.Snapshot.Present) { & $restorePort -Path ([string]$Record.Path) -Snapshot $Record.Snapshot }
+        if ($Record.Snapshot.Present) { & $restoreFileCreateOnlyPort -Path ([string]$Record.Path) -Snapshot $Record.Snapshot }
     }.GetNewClosure()
-    $restoreDirectoryRecord = { param($Record); & $restoreDirectoryPort -Path ([string]$Record.Path) -Snapshot $Record.Snapshot }.GetNewClosure()
+    $restoreDirectoryRecord = { param($Record, [bool]$RequireCreate); & $restoreDirectoryPort -Path ([string]$Record.Path) -Snapshot $Record.Snapshot -RequireCreate $RequireCreate }.GetNewClosure()
     Invoke-GoalRouterTerminalCleanupWithRecovery -ControlFiles @($Plan.RecoveryPath, $Plan.InstallerPath, $Plan.UninstallerPath) -TerminalFiles @($Plan.TerminalFiles) -TerminalDirectories @($Plan.TerminalDirectories) -FileRecovery $terminalFileRecovery -DirectoryRecovery $terminalDirectoryRecovery -RemoveFilePort $removeFilePort -RemoveDirectoryPort $removeDirectoryPort -RestoreFilePort $restoreFileRecord -RestoreDirectoryPort $restoreDirectoryRecord
 }
 
@@ -608,11 +637,9 @@ function Invoke-GoalRouterWindowsUninstall {
             )
             $boundedRestoreFile = {
                 param($Record)
-                $current = & $snapshotPort -Path ([string]$Record.Path)
-                if ($current.Present) { throw "terminal recovery file target is unexpectedly occupied: $($Record.Path)" }
-                & $Ports.Restore -Path ([string]$Record.Path) -Snapshot $Record.Snapshot
+                & $Ports.RestoreFileCreateOnly -Path ([string]$Record.Path) -Snapshot $Record.Snapshot
             }.GetNewClosure()
-            $boundedRestoreDirectory = { param($Record); & $Ports.RestoreDirectory -Path ([string]$Record.Path) -Snapshot $Record.Snapshot }.GetNewClosure()
+            $boundedRestoreDirectory = { param($Record, [bool]$RequireCreate); & $Ports.RestoreDirectory -Path ([string]$Record.Path) -Snapshot $Record.Snapshot -RequireCreate $RequireCreate }.GetNewClosure()
             Invoke-GoalRouterTerminalCleanupWithRecovery -ControlFiles @($boundedInstallerPath, $PhysicalUninstallerPath) -TerminalFiles $(if (-not $boundedRetainsState -and $boundedSentinelPresent) { @($boundedSentinelPath) } else { @() }) -TerminalDirectories (@($boundedBinPath) + $(if ($boundedRetainsState) { @() } else { @($installRootValue) })) -FileRecovery $boundedFileRecovery -DirectoryRecovery $boundedDirectoryRecovery -RemoveFilePort $Ports.RemoveFile -RemoveDirectoryPort $Ports.RemoveDirectory -RestoreFilePort $boundedRestoreFile -RestoreDirectoryPort $boundedRestoreDirectory
             [Console]::Out.WriteLine('GoalRouter final uninstaller cleanup completed')
             return

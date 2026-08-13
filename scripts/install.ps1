@@ -932,6 +932,24 @@ namespace GoalRouter {
             Set-Acl -LiteralPath $Path -AclObject $security -ErrorAction Stop
         }
     }
+    $restoreFileCreateOnly = {
+        param([string]$Path, $Snapshot)
+        if (-not $Snapshot.Present) { return }
+        $bytes = [Convert]::FromBase64String([string]$Snapshot.Bytes)
+        $stream = $null
+        try {
+            try { $stream = [IO.File]::Open($Path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None) }
+            catch { throw [IO.IOException]::new("terminal recovery create-only claim failed for an occupied or unsafe target: $Path", $_.Exception) }
+            $stream.Write($bytes, 0, $bytes.Length)
+            $stream.Flush($true)
+        } finally {
+            if ($null -ne $stream) { $stream.Dispose() }
+        }
+        [IO.File]::SetAttributes($Path, [IO.FileAttributes][int]$Snapshot.Attributes)
+        $security = [Security.AccessControl.FileSecurity]::new()
+        $security.SetSecurityDescriptorSddlForm([string]$Snapshot.SecurityDescriptorSddl, [Security.AccessControl.AccessControlSections]::All)
+        Set-Acl -LiteralPath $Path -AclObject $security -ErrorAction Stop
+    }
     $ensureDirectory = {
         param([string]$Path)
         $testDirectory = { param([string]$Path); return Test-Path -LiteralPath $Path -PathType Container }
@@ -987,33 +1005,45 @@ namespace GoalRouter {
             if ($resolved.Count -ne 1 -or [string]$resolved[0].Provider.Name -cne 'FileSystem' -or -not (Test-GoalRouterWindowsPathEquivalent -First ([string]$resolved[0].ProviderPath) -Second $Path)) { throw "refusing directory snapshot through provider redirection: $Path" }
             if (([IO.File]::GetAttributes($Path) -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "refusing directory snapshot through reparse point: $Path" }
             $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
-            return [pscustomobject]@{ Present = $true; Attributes = [int][IO.File]::GetAttributes($Path); SecurityDescriptorSddl = $acl.GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::All) }
+            $parent = Split-Path -Parent $Path
+            $resolvedParent = @(Resolve-Path -LiteralPath $parent -ErrorAction Stop)
+            if ($resolvedParent.Count -ne 1 -or [string]$resolvedParent[0].Provider.Name -cne 'FileSystem' -or -not (Test-GoalRouterWindowsPathEquivalent -First ([string]$resolvedParent[0].ProviderPath) -Second $parent) -or -not (Test-Path -LiteralPath $parent -PathType Container)) { throw "refusing directory snapshot through an unsafe parent: $Path" }
+            $parentAttributes = [int][IO.File]::GetAttributes($parent)
+            if (($parentAttributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "refusing directory snapshot through a reparse parent: $Path" }
+            $parentAcl = Get-Acl -LiteralPath $parent -ErrorAction Stop
+            return [pscustomobject]@{ Present = $true; Attributes = [int][IO.File]::GetAttributes($Path); SecurityDescriptorSddl = $acl.GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::All); ParentAttributes = $parentAttributes; ParentSecurityDescriptorSddl = $parentAcl.GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::All) }
         }
         if (Test-Path -LiteralPath $Path) { throw "owned directory snapshot target is not a directory: $Path" }
-        return [pscustomobject]@{ Present = $false; Attributes = $null; SecurityDescriptorSddl = $null }
+        return [pscustomobject]@{ Present = $false; Attributes = $null; SecurityDescriptorSddl = $null; ParentAttributes = $null; ParentSecurityDescriptorSddl = $null }
     }
     $restoreDirectory = {
-        param([string]$Path, $Snapshot)
+        param([string]$Path, $Snapshot, [bool]$RequireCreate)
         if (-not $Snapshot.Present) { return }
-        if (Test-Path -LiteralPath $Path) {
-            $resolved = @(Resolve-Path -LiteralPath $Path -ErrorAction Stop)
-            if ($resolved.Count -ne 1 -or [string]$resolved[0].Provider.Name -cne 'FileSystem' -or -not (Test-GoalRouterWindowsPathEquivalent -First ([string]$resolved[0].ProviderPath) -Second $Path) -or -not (Test-Path -LiteralPath $Path -PathType Container)) { throw "refusing directory recovery through provider redirection or wrong kind: $Path" }
-            $currentAttributes = [int][IO.File]::GetAttributes($Path)
-            if (($currentAttributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "refusing directory recovery through reparse point: $Path" }
-            $currentAcl = Get-Acl -LiteralPath $Path -ErrorAction Stop
-            $currentSddl = $currentAcl.GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::All)
-            if ($currentAttributes -ne [int]$Snapshot.Attributes -or $currentSddl -cne [string]$Snapshot.SecurityDescriptorSddl) { throw "refusing directory recovery after security or attribute change: $Path" }
+        if ($RequireCreate) {
+            $parent = Split-Path -Parent $Path
+            $resolvedParent = @(Resolve-Path -LiteralPath $parent -ErrorAction Stop)
+            if ($resolvedParent.Count -ne 1 -or [string]$resolvedParent[0].Provider.Name -cne 'FileSystem' -or -not (Test-GoalRouterWindowsPathEquivalent -First ([string]$resolvedParent[0].ProviderPath) -Second $parent) -or -not (Test-Path -LiteralPath $parent -PathType Container)) { throw "refusing directory recovery through an unsafe parent: $Path" }
+            $currentParentAttributes = [int][IO.File]::GetAttributes($parent)
+            if (($currentParentAttributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "refusing directory recovery through a reparse parent: $Path" }
+            $currentParentAcl = Get-Acl -LiteralPath $parent -ErrorAction Stop
+            $currentParentSddl = $currentParentAcl.GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::All)
+            if ($currentParentAttributes -ne [int]$Snapshot.ParentAttributes -or $currentParentSddl -cne [string]$Snapshot.ParentSecurityDescriptorSddl) { throw "refusing directory recovery after parent security or attribute change: $Path" }
+            try { [void](New-Item -ItemType Directory -Path $Path -ErrorAction Stop) }
+            catch { throw [IO.IOException]::new("terminal recovery directory create-only claim failed for an occupied or unsafe target: $Path", $_.Exception) }
+            [IO.File]::SetAttributes($Path, [IO.FileAttributes][int]$Snapshot.Attributes)
+            $security = [Security.AccessControl.DirectorySecurity]::new()
+            $security.SetSecurityDescriptorSddlForm([string]$Snapshot.SecurityDescriptorSddl, [Security.AccessControl.AccessControlSections]::All)
+            Set-Acl -LiteralPath $Path -AclObject $security -ErrorAction Stop
             return
         }
-        $parent = Split-Path -Parent $Path
-        $resolvedParent = @(Resolve-Path -LiteralPath $parent -ErrorAction Stop)
-        if ($resolvedParent.Count -ne 1 -or [string]$resolvedParent[0].Provider.Name -cne 'FileSystem' -or -not (Test-GoalRouterWindowsPathEquivalent -First ([string]$resolvedParent[0].ProviderPath) -Second $parent) -or -not (Test-Path -LiteralPath $parent -PathType Container)) { throw "refusing directory recovery through an unsafe parent: $Path" }
-        if (([IO.File]::GetAttributes($parent) -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "refusing directory recovery through a reparse parent: $Path" }
-        [void][IO.Directory]::CreateDirectory($Path)
-        [IO.File]::SetAttributes($Path, [IO.FileAttributes][int]$Snapshot.Attributes)
-        $security = [Security.AccessControl.DirectorySecurity]::new()
-        $security.SetSecurityDescriptorSddlForm([string]$Snapshot.SecurityDescriptorSddl, [Security.AccessControl.AccessControlSections]::All)
-        Set-Acl -LiteralPath $Path -AclObject $security -ErrorAction Stop
+        if (-not (Test-Path -LiteralPath $Path)) { throw "required existing recovery directory is missing: $Path" }
+        $resolved = @(Resolve-Path -LiteralPath $Path -ErrorAction Stop)
+        if ($resolved.Count -ne 1 -or [string]$resolved[0].Provider.Name -cne 'FileSystem' -or -not (Test-GoalRouterWindowsPathEquivalent -First ([string]$resolved[0].ProviderPath) -Second $Path) -or -not (Test-Path -LiteralPath $Path -PathType Container)) { throw "refusing directory recovery through provider redirection or wrong kind: $Path" }
+        $currentAttributes = [int][IO.File]::GetAttributes($Path)
+        if (($currentAttributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "refusing directory recovery through reparse point: $Path" }
+        $currentAcl = Get-Acl -LiteralPath $Path -ErrorAction Stop
+        $currentSddl = $currentAcl.GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::All)
+        if ($currentAttributes -ne [int]$Snapshot.Attributes -or $currentSddl -cne [string]$Snapshot.SecurityDescriptorSddl) { throw "refusing directory recovery after security or attribute change: $Path" }
     }
     $getPathInfo = {
         param([string]$Path)
@@ -1035,7 +1065,7 @@ namespace GoalRouter {
         GetHost = $getHost; ResolvePath = $resolvePath; ResolveLatestVersion = $resolveLatestVersion; NewWorkDirectory = $newWorkDirectory
         Native = $native; Download = $download; ReadText = $readText; WriteText = $writeText; GetHash = $getHash
         GetArchiveEntries = $getArchiveEntries; ExtractArchive = $extractArchive
-        Snapshot = $snapshot; SnapshotDirectory = $snapshotDirectory; Replace = $replace; Restore = $restore; RestoreDirectory = $restoreDirectory; EnsureDirectory = $ensureDirectory; RemoveFile = $removeFile; RemoveTree = $removeTree; RemoveDirectory = $removeEmptyDirectory
+        Snapshot = $snapshot; SnapshotDirectory = $snapshotDirectory; Replace = $replace; Restore = $restore; RestoreFileCreateOnly = $restoreFileCreateOnly; RestoreDirectory = $restoreDirectory; EnsureDirectory = $ensureDirectory; RemoveFile = $removeFile; RemoveTree = $removeTree; RemoveDirectory = $removeEmptyDirectory
         GetUserPath = $getUserPath; SetUserPath = $setUserPath; Doctor = $doctor; GetPathInfo = $getPathInfo
     }
 }

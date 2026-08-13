@@ -469,6 +469,12 @@ function New-MemoryLifecyclePorts {
         [void]$State.Calls.Add("restore:$Path")
         if ($Snapshot.Present) { $State.Files[$Path] = [string]$Snapshot.Content } else { [void]$State.Files.Remove($Path) }
     }.GetNewClosure()
+    $restoreFileCreateOnly = {
+        param([string]$Path, $Snapshot)
+        [void]$State.Calls.Add("restore-create-only:$Path")
+        if ($State.Files.ContainsKey($Path) -or $State.Directories.Contains($Path)) { throw "terminal recovery file target is unexpectedly occupied: $Path" }
+        if ($Snapshot.Present) { $State.Files[$Path] = [string]$Snapshot.Content }
+    }.GetNewClosure()
     $getPath = { return Copy-GoalRouterPathSnapshot -Snapshot $State.UserPath }.GetNewClosure()
     $setPath = {
         param($Snapshot)
@@ -513,11 +519,12 @@ function New-MemoryLifecyclePorts {
         return [pscustomobject]@{ Present = $State.Directories.Contains($Path) }
     }.GetNewClosure()
     $restoreDirectory = {
-        param([string]$Path, $Snapshot)
+        param([string]$Path, $Snapshot, [bool]$RequireCreate)
         [void]$State.Calls.Add("restore-directory:$Path")
+        if ($RequireCreate -and $State.Directories.Contains($Path)) { throw "terminal recovery directory target is unexpectedly occupied: $Path" }
         if ($Snapshot.Present) { [void]$State.Directories.Add($Path) }
     }.GetNewClosure()
-    return [pscustomobject]@{ Snapshot = $snapshot; SnapshotDirectory = $snapshotDirectory; Replace = $replace; Restore = $restore; RestoreDirectory = $restoreDirectory; GetUserPath = $getPath; SetUserPath = $setPath; Doctor = $doctor; RemoveFile = $remove; RemoveTree = $removeTree; RemoveDirectory = $removeDirectory }
+    return [pscustomobject]@{ Snapshot = $snapshot; SnapshotDirectory = $snapshotDirectory; Replace = $replace; Restore = $restore; RestoreFileCreateOnly = $restoreFileCreateOnly; RestoreDirectory = $restoreDirectory; GetUserPath = $getPath; SetUserPath = $setPath; Doctor = $doctor; RemoveFile = $remove; RemoveTree = $removeTree; RemoveDirectory = $removeDirectory }
 }
 
 Invoke-Contract 'atomic install commit rolls back files and exact User PATH after doctor failure' {
@@ -785,6 +792,11 @@ function New-FullInstallerFixture {
         ThrowRemoveDirectoryPath = $null
         ThrowRemoveDirectoryCount = 0
         ThrowRestorePath = $null
+        LateRestoreCollisionPath = $null
+        LateRestoreCollisionContent = $null
+        LateRestoreCollisionCount = 0
+        LateRestoreDirectoryCollisionPath = $null
+        LateRestoreDirectoryCollisionCount = 0
         LateTerminalFile = $null
         ResolveOverrides = @{}
         Removals = [System.Collections.ArrayList]::new()
@@ -855,11 +867,27 @@ function New-FullInstallerFixture {
     }.GetNewClosure()
     $snapshot = { param([string]$Path); if ($fixture.Files.ContainsKey($Path)) { return [pscustomobject]@{ Present = $true; Content = [string]$fixture.Files[$Path] } }; return [pscustomobject]@{ Present = $false; Content = $null } }.GetNewClosure()
     $replace = { param([string]$Path, [string]$Content); [void]$fixture.Mutations.Add("replace:$Path"); $fixture.Files[$Path] = $Content }.GetNewClosure()
+    $injectRestoreCollision = {
+        param([string]$Path)
+        if ([string]$fixture.LateRestoreCollisionPath -ceq $Path -and [int]$fixture.LateRestoreCollisionCount -gt 0) {
+            $fixture.LateRestoreCollisionCount--
+            $fixture.Files[$Path] = [string]$fixture.LateRestoreCollisionContent
+        }
+    }.GetNewClosure()
     $restore = {
         param([string]$Path, $Snapshot)
         [void]$fixture.Mutations.Add("restore:$Path")
         if ([string]$fixture.ThrowRestorePath -ceq $Path) { throw "injected restoration failure: $Path" }
+        & $injectRestoreCollision -Path $Path
         if ($Snapshot.Present) { $fixture.Files[$Path] = $Snapshot.Content } else { [void]$fixture.Files.Remove($Path) }
+    }.GetNewClosure()
+    $restoreFileCreateOnly = {
+        param([string]$Path, $Snapshot)
+        [void]$fixture.Mutations.Add("restore-create-only:$Path")
+        if ([string]$fixture.ThrowRestorePath -ceq $Path) { throw "injected restoration failure: $Path" }
+        & $injectRestoreCollision -Path $Path
+        if ($fixture.Files.ContainsKey($Path) -or $fixture.Directories.Contains($Path)) { throw "terminal recovery file target is unexpectedly occupied: $Path" }
+        if ($Snapshot.Present) { $fixture.Files[$Path] = $Snapshot.Content }
     }.GetNewClosure()
     $getPath = { return Copy-GoalRouterPathSnapshot $fixture.UserPath }.GetNewClosure()
     $setPath = { param($Snapshot); [void]$fixture.Mutations.Add('set-user-path'); $fixture.UserPath = Copy-GoalRouterPathSnapshot $Snapshot }.GetNewClosure()
@@ -903,9 +931,14 @@ function New-FullInstallerFixture {
         return [pscustomobject]@{ Present = $fixture.Directories.Contains($Path); Path = $Path; Marker = "directory-snapshot:$Path" }
     }.GetNewClosure()
     $restoreDirectory = {
-        param([string]$Path, $Snapshot)
+        param([string]$Path, $Snapshot, [bool]$RequireCreate)
         [void]$fixture.Mutations.Add("restore-directory:$Path")
         if ([string]$fixture.ThrowRestorePath -ceq $Path) { throw "injected restoration failure: $Path" }
+        if ([string]$fixture.LateRestoreDirectoryCollisionPath -ceq $Path -and [int]$fixture.LateRestoreDirectoryCollisionCount -gt 0) {
+            $fixture.LateRestoreDirectoryCollisionCount--
+            [void]$fixture.Directories.Add($Path)
+        }
+        if ($RequireCreate -and $fixture.Directories.Contains($Path)) { throw "terminal recovery directory target is unexpectedly occupied: $Path" }
         if ($Snapshot.Present) { [void]$fixture.Directories.Add($Path) }
     }.GetNewClosure()
     $fixtureSentinelName = $script:GoalRouterDirectorySentinel
@@ -917,7 +950,7 @@ function New-FullInstallerFixture {
         $isContainer = -not $isLeaf -and ($fixture.Directories.Contains($Path) -or $entries.Count -gt 0)
         return [pscustomobject]@{ Path = $Path; ProviderName = 'FileSystem'; ProviderPath = $Path; Exists = $isLeaf -or $isContainer; IsContainer = $isContainer; IsLeaf = $isLeaf; IsReparsePoint = $false; ContainsReparsePoint = $false; OwnerMatchesCurrentUser = $true; AclIsSafe = $true; Entries = $entries; Sentinel = if ($isContainer -and $fixture.Files.ContainsKey($sentinelPath)) { [string]$fixture.Files[$sentinelPath] } else { $null } }
     }.GetNewClosure()
-    $ports = [pscustomobject]@{ GetHost = $hostInfo; ResolvePath = $resolve; ResolveLatestVersion = $resolveLatest; NewWorkDirectory = $newWork; Download = $download; ReadText = $read; WriteText = $write; GetHash = $hash; GetArchiveEntries = $entries; ExtractArchive = $extract; Native = $native; Snapshot = $snapshot; SnapshotDirectory = $snapshotDirectory; Replace = $replace; Restore = $restore; RestoreDirectory = $restoreDirectory; GetUserPath = $getPath; SetUserPath = $setPath; Doctor = $doctor; EnsureDirectory = $ensure; RemoveFile = $removeFile; RemoveTree = $removeTree; RemoveDirectory = $removeDirectory; GetPathInfo = $pathInfo }
+    $ports = [pscustomobject]@{ GetHost = $hostInfo; ResolvePath = $resolve; ResolveLatestVersion = $resolveLatest; NewWorkDirectory = $newWork; Download = $download; ReadText = $read; WriteText = $write; GetHash = $hash; GetArchiveEntries = $entries; ExtractArchive = $extract; Native = $native; Snapshot = $snapshot; SnapshotDirectory = $snapshotDirectory; Replace = $replace; Restore = $restore; RestoreFileCreateOnly = $restoreFileCreateOnly; RestoreDirectory = $restoreDirectory; GetUserPath = $getPath; SetUserPath = $setPath; Doctor = $doctor; EnsureDirectory = $ensure; RemoveFile = $removeFile; RemoveTree = $removeTree; RemoveDirectory = $removeDirectory; GetPathInfo = $pathInfo }
     return [pscustomobject]@{ State = $fixture; Ports = $ports }
 }
 
@@ -1380,6 +1413,63 @@ Invoke-Contract 'terminal recovery failures retain the primary directory failure
     Assert-True $directoryCaught.Exception.Message.Contains('injected terminal directory failure: D:\Install\bin') 'directory recovery does not replace the primary terminal failure'
     Assert-True ([string]$directoryCaught.Exception.Data['GoalRouterTerminalRecoveryFailures'] -match 'injected restoration failure') 'directory recovery failure is attached'
     Assert-Equal @($directoryFixture.State.Mutations | Where-Object { $_.StartsWith('restore:', [StringComparison]::Ordinal) }).Count 0 'unsafe directory recovery prevents descendant control-file restoration'
+}
+
+Invoke-Contract 'unsafe parent recovery stops every descendant restoration' {
+    $fixture = New-FullInstallerFixture
+    Invoke-GoalRouterWindowsInstall -Options (New-FullInstallOptions) -Ports $fixture.Ports
+    $fixture.State.Mutations.Clear()
+    $fixture.State.ThrowRemoveDirectoryPath = 'D:\Install'
+    $fixture.State.ThrowRemoveDirectoryCount = 1
+    $fixture.State.ThrowRestorePath = 'D:\Install'
+    $caught = $null
+    $priorErrorCount = $Error.Count
+    try { Invoke-GoalRouterWindowsUninstall -SelectedInstallRoot 'D:\Install' -SelectedPurge $false -Confirmed $true -Ports $fixture.Ports -PhysicalUninstallerPath 'D:\Install\bin\uninstall.ps1' } catch { $caught = $_ }
+    $addedErrorCount = $Error.Count - $priorErrorCount
+    for ($index = 0; $index -lt $addedErrorCount; $index++) { $Error.RemoveAt(0) }
+    Assert-True ($null -ne $caught) 'unsafe parent recovery throws'
+    Assert-True $caught.Exception.Message.Contains('injected terminal directory failure: D:\Install') 'unsafe parent recovery preserves primary terminal failure'
+    Assert-True ([string]$caught.Exception.Data['GoalRouterTerminalRecoveryFailures'] -match 'injected restoration failure') 'unsafe parent recovery attaches root trust failure'
+    Assert-True (-not $fixture.State.Directories.Contains('D:\Install\bin')) 'unsafe root never receives a recreated bin descendant'
+    Assert-True ('restore-directory:D:\Install\bin' -cnotin @($fixture.State.Mutations)) 'child directory recovery stops after parent failure'
+    Assert-Equal @($fixture.State.Mutations | Where-Object { $_.StartsWith('restore:', [StringComparison]::Ordinal) -or $_.StartsWith('restore-create-only:', [StringComparison]::Ordinal) }).Count 0 'file recovery stops after parent failure'
+
+    $collisionFixture = New-FullInstallerFixture
+    Invoke-GoalRouterWindowsInstall -Options (New-FullInstallOptions) -Ports $collisionFixture.Ports
+    $collisionFixture.State.Mutations.Clear()
+    $collisionFixture.State.ThrowRemoveDirectoryPath = 'D:\Install'
+    $collisionFixture.State.ThrowRemoveDirectoryCount = 1
+    $collisionFixture.State.LateRestoreDirectoryCollisionPath = 'D:\Install\bin'
+    $collisionFixture.State.LateRestoreDirectoryCollisionCount = 1
+    $collisionCaught = $null
+    $priorErrorCount = $Error.Count
+    try { Invoke-GoalRouterWindowsUninstall -SelectedInstallRoot 'D:\Install' -SelectedPurge $false -Confirmed $true -Ports $collisionFixture.Ports -PhysicalUninstallerPath 'D:\Install\bin\uninstall.ps1' } catch { $collisionCaught = $_ }
+    $addedErrorCount = $Error.Count - $priorErrorCount
+    for ($index = 0; $index -lt $addedErrorCount; $index++) { $Error.RemoveAt(0) }
+    Assert-True ($null -ne $collisionCaught) 'interleaved directory collision recovery throws'
+    Assert-True $collisionCaught.Exception.Message.Contains('injected terminal directory failure: D:\Install') 'directory collision preserves primary terminal failure'
+    Assert-True ([string]$collisionCaught.Exception.Data['GoalRouterTerminalRecoveryFailures'] -match 'unexpectedly occupied|collision') 'directory collision is attached as a recovery diagnostic'
+    Assert-Equal @($collisionFixture.State.Mutations | Where-Object { $_.StartsWith('restore:', [StringComparison]::Ordinal) -or $_.StartsWith('restore-create-only:', [StringComparison]::Ordinal) }).Count 0 'directory collision prevents descendant file writes'
+}
+
+Invoke-Contract 'terminal control recovery atomically preserves an interleaved foreign occupant' {
+    $fixture = New-FullInstallerFixture
+    Invoke-GoalRouterWindowsInstall -Options (New-FullInstallOptions) -Ports $fixture.Ports
+    $fixture.State.ThrowRemoveDirectoryPath = 'D:\Install\bin'
+    $fixture.State.ThrowRemoveDirectoryCount = 1
+    $fixture.State.LateRestoreCollisionPath = 'D:\Install\bin\uninstall.ps1'
+    $fixture.State.LateRestoreCollisionContent = 'foreign-interleaved-content'
+    $fixture.State.LateRestoreCollisionCount = 1
+    $caught = $null
+    $priorErrorCount = $Error.Count
+    try { Invoke-GoalRouterWindowsUninstall -SelectedInstallRoot 'D:\Install' -SelectedPurge $false -Confirmed $true -Ports $fixture.Ports -PhysicalUninstallerPath 'D:\Install\bin\uninstall.ps1' } catch { $caught = $_ }
+    $addedErrorCount = $Error.Count - $priorErrorCount
+    for ($index = 0; $index -lt $addedErrorCount; $index++) { $Error.RemoveAt(0) }
+    Assert-True ($null -ne $caught) 'terminal collision recovery throws'
+    Assert-True $caught.Exception.Message.Contains('injected terminal directory failure: D:\Install\bin') 'terminal collision preserves primary failure'
+    Assert-Equal $fixture.State.Files['D:\Install\bin\uninstall.ps1'] 'foreign-interleaved-content' 'atomic recovery never overwrites interleaved foreign bytes'
+    Assert-True ([string]$caught.Exception.Data['GoalRouterTerminalRecoveryFailures'] -match 'unexpectedly occupied|collision') 'terminal collision is attached as a recovery diagnostic'
+    Assert-True ('restore-create-only:D:\Install\bin\uninstall.ps1' -cin @($fixture.State.Mutations)) 'terminal recovery uses the create-only file port'
 }
 
 Invoke-Contract 'installed lifecycle dispatch uses powershell and never WSL or runtime state' {
@@ -2172,9 +2262,34 @@ Invoke-Contract 'production terminal directory port deletes only an exact empty 
         $restoreDirectoryBlock = $source.Substring($restoreDirectoryStart, $source.IndexOf('$getPathInfo = {') - $restoreDirectoryStart)
         Assert-True $restoreDirectoryBlock.Contains('$currentAttributes -ne [int]$Snapshot.Attributes') 'existing recovery directory must match its captured attributes'
         Assert-True $restoreDirectoryBlock.Contains('$currentSddl -cne [string]$Snapshot.SecurityDescriptorSddl') 'existing recovery directory must match its captured security descriptor'
+        Assert-True $restoreDirectoryBlock.Contains('$currentParentAttributes -ne [int]$Snapshot.ParentAttributes') 'directory recreation parent must match its captured attributes'
+        Assert-True $restoreDirectoryBlock.Contains('$currentParentSddl -cne [string]$Snapshot.ParentSecurityDescriptorSddl') 'directory recreation parent must match its captured security descriptor'
+        Assert-True $restoreDirectoryBlock.Contains('if ($RequireCreate)') 'directory recovery distinguishes required recreation from existing validation'
+        Assert-True $restoreDirectoryBlock.Contains('New-Item -ItemType Directory -Path $Path -ErrorAction Stop') 'directory recreation uses a collision-failing atomic provider claim'
+        Assert-True (-not $restoreDirectoryBlock.Contains('[IO.Directory]::CreateDirectory($Path)')) 'directory recovery never silently accepts a raced existing directory'
     } finally {
         if (Test-Path -LiteralPath $fixtureRoot) { Remove-Item -LiteralPath $fixtureRoot -Recurse -Force -ErrorAction Stop }
     }
+}
+
+Invoke-Contract 'production terminal file recovery is atomic create-only' {
+    $installerSource = [IO.File]::ReadAllText($installer)
+    $createOnlyStart = $installerSource.IndexOf('$restoreFileCreateOnly = {')
+    Assert-True ($createOnlyStart -ge 0) 'production lifecycle exposes a dedicated create-only recovery port'
+    $createOnlyBlock = $installerSource.Substring($createOnlyStart, $installerSource.IndexOf('$ensureDirectory = {') - $createOnlyStart)
+    Assert-True $createOnlyBlock.Contains('[IO.FileMode]::CreateNew') 'production recovery claims the absent path atomically'
+    Assert-True $createOnlyBlock.Contains('[IO.FileShare]::None') 'production recovery holds exclusive file creation authority'
+    Assert-True (-not $createOnlyBlock.Contains('Remove-Item')) 'create-only recovery never deletes an occupant'
+    Assert-True (-not $createOnlyBlock.Contains('WriteAllBytes')) 'create-only recovery never uses overwrite-capable path writes'
+    $uninstallerSource = [IO.File]::ReadAllText($uninstaller)
+    Assert-True $uninstallerSource.Contains('$Ports.RestoreFileCreateOnly') 'normal and bounded public recovery use the create-only port'
+    $bootstrapStart = $uninstallerSource.IndexOf('function Restore-GoalRouterBootstrapFileSnapshot')
+    $bootstrapBlock = $uninstallerSource.Substring($bootstrapStart, $uninstallerSource.IndexOf('function New-GoalRouterBootstrapDirectorySnapshot') - $bootstrapStart)
+    Assert-True $bootstrapBlock.Contains('[IO.FileMode]::CreateNew') 'pre-import recovery claims the absent path atomically'
+    Assert-True $bootstrapBlock.Contains('[IO.FileShare]::None') 'pre-import recovery uses exclusive creation'
+    Assert-True (-not $bootstrapBlock.Contains('Test-Path')) 'pre-import recovery has no check-then-write gap'
+    Assert-True (-not $bootstrapBlock.Contains('WriteAllBytes')) 'pre-import recovery has no overwrite-capable write'
+    Assert-True (-not $bootstrapBlock.Contains('Remove-Item')) 'pre-import recovery never deletes an occupant'
 }
 
 Invoke-Contract 'pre-import lifecycle and bounded self cleanup require typed trusted physical leaves' {
