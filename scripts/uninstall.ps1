@@ -15,6 +15,12 @@ $ErrorActionPreference = 'Stop'
 $WarningPreference = 'Stop'
 $goalRouterUninstallerIsDotSourced = $MyInvocation.InvocationName -ceq '.'
 
+function Assert-GoalRouterTrustedStateParity {
+    param([Parameter(Mandatory = $true)][string]$TrustedJson, [AllowNull()][string]$StateJson)
+    if ([string]::IsNullOrEmpty($StateJson)) { throw 'runtime state parity manifest is missing' }
+    if ($TrustedJson -cne $StateJson) { throw 'runtime state parity does not match trusted install control' }
+}
+
 function Assert-GoalRouterBootstrapLeaf {
     param(
         [Parameter(Mandatory = $true)][string]$Path,

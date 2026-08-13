@@ -70,6 +70,39 @@ Invoke-Contract 'Windows lifecycle scripts exist' {
     Assert-True (Test-Path -LiteralPath $uninstaller -PathType Leaf) 'uninstall.ps1 is missing'
 }
 
+Invoke-Contract 'installed uninstaller composition is closed without the launcher' {
+    $definedCommands = @(
+        foreach ($path in @($installer, $uninstaller)) {
+            $tokens = $null
+            $parseErrors = $null
+            $ast = [Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$parseErrors)
+            Assert-Equal $parseErrors.Count 0 "PowerShell parse errors in $path"
+            @($ast.FindAll({
+                param($node)
+                $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -cmatch '\A[A-Za-z]+-GoalRouter[A-Za-z0-9-]*\z'
+            }, $true) | ForEach-Object { $_.Name })
+        }
+    ) | Sort-Object -Unique
+    $tokens = $null
+    $parseErrors = $null
+    $uninstallerAst = [Management.Automation.Language.Parser]::ParseFile($uninstaller, [ref]$tokens, [ref]$parseErrors)
+    Assert-Equal $parseErrors.Count 0 'PowerShell parse errors in uninstall.ps1'
+    $calledCommands = @($uninstallerAst.FindAll({
+        param($node)
+        $node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -cmatch '\A[A-Za-z]+-GoalRouter[A-Za-z0-9-]*\z'
+    }, $true) | ForEach-Object { $_.GetCommandName() } | Sort-Object -Unique)
+    $missingCommands = @($calledCommands | Where-Object { $_ -cnotin $definedCommands })
+    Assert-Equal $missingCommands @() "uninstaller GoalRouter command dependency closure (missing: $($missingCommands -join ', '))"
+
+    & {
+        . $installer
+        . $uninstaller
+        Assert-GoalRouterTrustedStateParity -TrustedJson '{"trusted":true}' -StateJson '{"trusted":true}'
+        Assert-Throws { Assert-GoalRouterTrustedStateParity -TrustedJson '{"trusted":true}' -StateJson $null } 'runtime state parity manifest is missing' 'missing standalone uninstaller parity'
+        Assert-Throws { Assert-GoalRouterTrustedStateParity -TrustedJson '{"trusted":true}' -StateJson '{"trusted":false}' } 'runtime state parity does not match trusted install control' 'different standalone uninstaller parity'
+    }
+}
+
 if (Test-Path -LiteralPath $launcher -PathType Leaf) {
     $env:GOALROUTER_LAUNCHER_TEST_MODE = '1'
     . $launcher
