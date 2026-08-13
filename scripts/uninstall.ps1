@@ -38,6 +38,27 @@ function Assert-GoalRouterBootstrapLeaf {
     return [string]$Inspection.ProviderPath
 }
 
+function Assert-GoalRouterBootstrapDirectory {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$ExpectedPath,
+        [Parameter(Mandatory = $true)]$Inspection,
+        [Parameter(Mandatory = $true)][string[]]$AllowedEntries
+    )
+    $normalize = { param([string]$Value); $Value.Replace('/', '\').TrimEnd('\') }
+    if ([string]::IsNullOrEmpty($Path) -or (& $normalize $Path) -ine (& $normalize $ExpectedPath) -or (& $normalize $Path) -cnotmatch '\A[A-Za-z]:\\[^\\].*\z') { throw 'bootstrap lifecycle directory is not the exact expected local path' }
+    if ([int]$Inspection.Count -ne 1 -or [string]$Inspection.ProviderName -ine 'FileSystem' -or (& $normalize ([string]$Inspection.ProviderPath)) -ine (& $normalize $Path)) { throw 'bootstrap lifecycle directory does not have exact FileSystem provider identity' }
+    if (-not [bool]$Inspection.IsContainer -or ($Inspection.PSObject.Properties.Name -contains 'IsLeaf' -and [bool]$Inspection.IsLeaf)) { throw 'bootstrap lifecycle target is not a directory' }
+    if ([bool]$Inspection.IsReparsePoint -or ($Inspection.PSObject.Properties.Name -contains 'ContainsReparsePoint' -and [bool]$Inspection.ContainsReparsePoint)) { throw 'bootstrap lifecycle directory contains a reparse point' }
+    if (-not [bool]$Inspection.OwnerMatchesCurrentUser) { throw 'bootstrap lifecycle directory is not owned by the current user' }
+    if (-not [bool]$Inspection.AclIsSafe) { throw 'bootstrap lifecycle directory ACL is unsafe' }
+    if ($Inspection.PSObject.Properties.Name -notcontains 'AncestorChainIsSafe' -or -not [bool]$Inspection.AncestorChainIsSafe) { throw 'bootstrap lifecycle directory ancestor chain is unsafe' }
+    foreach ($entry in @($Inspection.Entries)) {
+        if ([string]$entry -cnotin @($AllowedEntries)) { throw 'bootstrap lifecycle directory contains unexpected content' }
+    }
+    return [string]$Inspection.ProviderPath
+}
+
 function Get-GoalRouterBootstrapMutationRightsMask {
     return [long]([Security.AccessControl.FileSystemRights]::WriteData -bor [Security.AccessControl.FileSystemRights]::AppendData -bor [Security.AccessControl.FileSystemRights]::WriteExtendedAttributes -bor [Security.AccessControl.FileSystemRights]::WriteAttributes -bor [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor [Security.AccessControl.FileSystemRights]::Delete -bor [Security.AccessControl.FileSystemRights]::ChangePermissions -bor [Security.AccessControl.FileSystemRights]::TakeOwnership)
 }
@@ -86,6 +107,56 @@ function Assert-GoalRouterBootstrapPhysicalLeaf {
     return Assert-GoalRouterBootstrapLeaf -Path $Path -ExpectedPath $ExpectedPath -Inspection $inspection
 }
 
+function Assert-GoalRouterBootstrapPhysicalDirectory {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$ExpectedPath,
+        [Parameter(Mandatory = $true)][string[]]$AllowedEntries
+    )
+    $resolved = @(Resolve-Path -LiteralPath $Path -ErrorAction Stop)
+    $isContainer = $resolved.Count -eq 1 -and (Test-Path -LiteralPath $Path -PathType Container)
+    $isLeaf = $resolved.Count -eq 1 -and (Test-Path -LiteralPath $Path -PathType Leaf)
+    $isReparse = $isContainer -and (([IO.File]::GetAttributes($Path) -band [IO.FileAttributes]::ReparsePoint) -ne 0)
+    $containsReparse = $false
+    $ownerMatches = $false
+    $aclIsSafe = $false
+    $ancestorChainIsSafe = $true
+    $entries = @()
+    if ($isContainer -and -not $isReparse) {
+        $children = @(Get-ChildItem -LiteralPath $Path -Force -ErrorAction Stop)
+        $entries = @($children | ForEach-Object { $_.Name })
+        $containsReparse = @($children | Where-Object { ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 }).Count -gt 0
+        if (-not $containsReparse) { $containsReparse = @(Get-ChildItem -LiteralPath $Path -Force -Recurse -ErrorAction Stop | Where-Object { ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 }).Count -gt 0 }
+        $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+        $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
+        $ownerSid = if ([string]$acl.Owner -match '\AS-\d(?:-\d+)+\z') { [string]$acl.Owner } else { ([Security.Principal.NTAccount]$acl.Owner).Translate([Security.Principal.SecurityIdentifier]).Value }
+        $allowedSids = @($identity.User.Value, 'S-1-5-18', 'S-1-5-32-544', 'S-1-3-0')
+        $unsafe = @($acl.Access | Where-Object {
+            $sid = $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+            $_.AccessControlType -ceq [Security.AccessControl.AccessControlType]::Allow -and (Test-GoalRouterBootstrapAclRightsUnsafe -Rights ([long]$_.FileSystemRights)) -and $sid -notin $allowedSids
+        }).Count -gt 0
+        $ownerMatches = $ownerSid -ceq $identity.User.Value
+        $aclIsSafe = -not $unsafe
+        $cursor = Split-Path -Parent ([string]$resolved[0].ProviderPath)
+        while (-not [string]::IsNullOrEmpty($cursor)) {
+            if ($cursor.Replace('/', '\').TrimEnd('\') -cmatch '\A[A-Za-z]:\z') { break }
+            if (([IO.File]::GetAttributes($cursor) -band [IO.FileAttributes]::ReparsePoint) -ne 0) { $ancestorChainIsSafe = $false; break }
+            $ancestorAcl = Get-Acl -LiteralPath $cursor -ErrorAction Stop
+            $ancestorOwnerSid = if ([string]$ancestorAcl.Owner -match '\AS-\d(?:-\d+)+\z') { [string]$ancestorAcl.Owner } else { ([Security.Principal.NTAccount]$ancestorAcl.Owner).Translate([Security.Principal.SecurityIdentifier]).Value }
+            $ancestorUnsafe = @($ancestorAcl.Access | Where-Object {
+                $sid = $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+                $_.AccessControlType -ceq [Security.AccessControl.AccessControlType]::Allow -and (Test-GoalRouterBootstrapAclRightsUnsafe -Rights ([long]$_.FileSystemRights)) -and $sid -notin $allowedSids
+            }).Count -gt 0
+            if ($ancestorOwnerSid -notin $allowedSids -or $ancestorUnsafe) { $ancestorChainIsSafe = $false; break }
+            $next = Split-Path -Parent $cursor
+            if ([string]::IsNullOrEmpty($next) -or $next -ceq $cursor) { break }
+            $cursor = $next
+        }
+    }
+    $inspection = [pscustomobject]@{ Count = $resolved.Count; ProviderName = if ($resolved.Count -eq 1) { [string]$resolved[0].Provider.Name } else { $null }; ProviderPath = if ($resolved.Count -eq 1) { [string]$resolved[0].ProviderPath } else { $null }; IsContainer = $isContainer; IsLeaf = $isLeaf; IsReparsePoint = $isReparse; ContainsReparsePoint = $containsReparse; OwnerMatchesCurrentUser = $ownerMatches; AclIsSafe = $aclIsSafe; AncestorChainIsSafe = $ancestorChainIsSafe; Entries = $entries }
+    return Assert-GoalRouterBootstrapDirectory -Path $Path -ExpectedPath $ExpectedPath -Inspection $inspection -AllowedEntries $AllowedEntries
+}
+
 $selectedInstallRootArgument = $InstallRoot
 $selectedConfirmedArgument = [bool]$Yes
 try {
@@ -93,17 +164,36 @@ try {
     if (-not (Test-Path -LiteralPath $installerLibrary -PathType Leaf)) {
         if ($goalRouterUninstallerIsDotSourced) { throw 'trusted lifecycle library is missing' }
         $fallbackInstallRoot = if ([string]::IsNullOrEmpty($selectedInstallRootArgument)) { Join-Path $env:LOCALAPPDATA 'GoalRouter' } else { $selectedInstallRootArgument }
-        $expectedUninstaller = Join-Path (Join-Path $fallbackInstallRoot 'bin') 'uninstall.ps1'
+        $fallbackBinPath = Join-Path $fallbackInstallRoot 'bin'
+        $fallbackSentinelPath = Join-Path $fallbackInstallRoot '.goalrouter-owned-v1'
+        $fallbackStatePath = Join-Path $fallbackInstallRoot 'state'
+        $expectedUninstaller = Join-Path $fallbackBinPath 'uninstall.ps1'
         $normalizeWindowsPath = { param([string]$Path); return $Path.Replace('/', '\').TrimEnd('\') }
         if ([string]::IsNullOrEmpty($fallbackInstallRoot) -or (& $normalizeWindowsPath $fallbackInstallRoot) -notmatch '\A[A-Za-z]:\\[^\\].*\z' -or (& $normalizeWindowsPath $PSCommandPath) -ine (& $normalizeWindowsPath $expectedUninstaller)) { throw 'trusted lifecycle library is missing' }
         foreach ($requiredAbsent in @('install.json', 'install.sha256', 'uninstall-recovery.json')) {
             if (Test-Path -LiteralPath (Join-Path $fallbackInstallRoot $requiredAbsent)) { throw 'trusted lifecycle library is missing before bounded final cleanup' }
         }
-        foreach ($requiredAbsent in @('goalrouter.ps1', 'goalrouter.cmd', 'install.ps1')) {
-            if (Test-Path -LiteralPath (Join-Path $PSScriptRoot $requiredAbsent)) { throw 'trusted lifecycle library is missing before bounded final cleanup' }
-        }
+        $resolvedRootTarget = Assert-GoalRouterBootstrapPhysicalDirectory -Path $fallbackInstallRoot -ExpectedPath $fallbackInstallRoot -AllowedEntries @('bin', 'state', '.goalrouter-owned-v1')
+        $resolvedBinTarget = Assert-GoalRouterBootstrapPhysicalDirectory -Path $PSScriptRoot -ExpectedPath $fallbackBinPath -AllowedEntries @('uninstall.ps1')
         $resolvedSelfTarget = Assert-GoalRouterBootstrapPhysicalLeaf -Path $PSCommandPath -ExpectedPath $expectedUninstaller
+        $retainsNestedState = Test-Path -LiteralPath $fallbackStatePath -PathType Container
+        $sentinelPresent = Test-Path -LiteralPath $fallbackSentinelPath
+        if ($sentinelPresent) {
+            $resolvedSentinelTarget = Assert-GoalRouterBootstrapPhysicalLeaf -Path $fallbackSentinelPath -ExpectedPath $fallbackSentinelPath
+            if ([IO.File]::ReadAllText($resolvedSentinelTarget, [Text.Encoding]::UTF8) -cne 'goalrouter-owned-directory-v1') { throw 'bounded install root ownership sentinel is invalid' }
+        }
+        if ($retainsNestedState) {
+            if (-not $sentinelPresent) { throw 'bounded nested state lacks the install root ownership sentinel' }
+            [void](Assert-GoalRouterBootstrapPhysicalDirectory -Path $fallbackStatePath -ExpectedPath $fallbackStatePath -AllowedEntries @('.goalrouter-owned-v1', 'install.json', 'install.sha256', 'runs', 'reports'))
+            $stateSentinelPath = Join-Path $fallbackStatePath '.goalrouter-owned-v1'
+            $resolvedStateSentinel = Assert-GoalRouterBootstrapPhysicalLeaf -Path $stateSentinelPath -ExpectedPath $stateSentinelPath
+            if ([IO.File]::ReadAllText($resolvedStateSentinel, [Text.Encoding]::UTF8) -cne 'goalrouter-owned-directory-v1') { throw 'bounded state ownership sentinel is invalid' }
+        } elseif ($sentinelPresent) {
+            Remove-Item -LiteralPath $resolvedSentinelTarget -ErrorAction Stop
+        }
         Remove-Item -LiteralPath $resolvedSelfTarget -ErrorAction Stop
+        [IO.Directory]::Delete($resolvedBinTarget, $false)
+        if (-not $retainsNestedState) { [IO.Directory]::Delete($resolvedRootTarget, $false) }
         [Console]::Out.WriteLine('GoalRouter final uninstaller cleanup completed')
         exit 0
     }
@@ -173,6 +263,27 @@ function Assert-GoalRouterUninstallFileTarget {
     if ($Info.PSObject.Properties.Name -contains 'AclIsSafe' -and -not [bool]$Info.AclIsSafe) { throw "owned file target ACL is unsafe: $ExpectedPath" }
 }
 
+function Assert-GoalRouterUninstallDirectoryTarget {
+    param(
+        [Parameter(Mandatory = $true)]$Info,
+        [Parameter(Mandatory = $true)][string]$ExpectedPath,
+        [Parameter(Mandatory = $true)][string[]]$AllowedEntries,
+        [bool]$AllowMissing
+    )
+    if (-not (Test-GoalRouterWindowsPathEquivalent -First ([string]$Info.Path) -Second $ExpectedPath) -or [string]$Info.ProviderName -cne 'FileSystem' -or -not (Test-GoalRouterWindowsPathEquivalent -First ([string]$Info.ProviderPath) -Second $ExpectedPath)) { throw "owned directory target provider identity is unsafe: $ExpectedPath" }
+    if (-not [bool]$Info.Exists) {
+        if ($AllowMissing) { return }
+        throw "owned directory target is missing: $ExpectedPath"
+    }
+    if (-not [bool]$Info.IsContainer -or [bool]$Info.IsLeaf -or [bool]$Info.IsReparsePoint) { throw "owned directory target is not a non-reparse directory: $ExpectedPath" }
+    if ($Info.PSObject.Properties.Name -contains 'ContainsReparsePoint' -and [bool]$Info.ContainsReparsePoint) { throw "owned directory target contains a recursive reparse point: $ExpectedPath" }
+    if ($Info.PSObject.Properties.Name -contains 'OwnerMatchesCurrentUser' -and -not [bool]$Info.OwnerMatchesCurrentUser) { throw "owned directory target is not owned by the current user: $ExpectedPath" }
+    if ($Info.PSObject.Properties.Name -contains 'AclIsSafe' -and -not [bool]$Info.AclIsSafe) { throw "owned directory target ACL is unsafe: $ExpectedPath" }
+    foreach ($entry in @($Info.Entries)) {
+        if ([string]$entry -cnotin @($AllowedEntries)) { throw "owned directory target contains unexpected content: $ExpectedPath" }
+    }
+}
+
 function New-GoalRouterUninstallRecoveryRecord {
     param(
         [Parameter(Mandatory = $true)][ValidateSet('preserve', 'purge')][string]$Mode,
@@ -228,6 +339,11 @@ function New-GoalRouterUninstallPlan {
             if ([bool]$PathInfos.State.Exists) { [string]$owned.state_dir }
         )
     } else { @() }
+    $nestedStatePath = Join-GoalRouterWindowsPath ([string]$owned.install_root) 'state'
+    $preservesNestedState = -not $Purge -and (Test-GoalRouterWindowsPathEquivalent -First ([string]$owned.state_dir) -Second $nestedStatePath)
+    [string[]]$terminalFiles = @()
+    if (-not $preservesNestedState) { $terminalFiles = @((Join-GoalRouterWindowsPath ([string]$owned.install_root) $script:GoalRouterDirectorySentinel)) }
+    $terminalDirectories = @([string]$owned.bin_dir) + $(if ($preservesNestedState) { @() } else { @([string]$owned.install_root) })
     $recovery = New-GoalRouterUninstallRecoveryRecord -Mode $mode -Phase 'start' -Manifest $Manifest
     return [pscustomobject]@{
         Mode = $mode
@@ -235,7 +351,9 @@ function New-GoalRouterUninstallPlan {
         Manifest = $Manifest
         EarlyFiles = @([string]$owned.launcher, [string]$owned.cmd, (Join-GoalRouterWindowsPath ([string]$owned.state_dir) 'install.json'), (Join-GoalRouterWindowsPath ([string]$owned.state_dir) 'install.sha256'))
         RemoveTrees = $removeTrees
-        FinalFiles = @((Join-GoalRouterWindowsPath ([string]$owned.install_root) 'install.json'), (Join-GoalRouterWindowsPath ([string]$owned.install_root) 'install.sha256')) + $(if ($Purge) { @((Join-GoalRouterWindowsPath ([string]$owned.install_root) $script:GoalRouterDirectorySentinel)) } else { @() })
+        FinalFiles = @((Join-GoalRouterWindowsPath ([string]$owned.install_root) 'install.json'), (Join-GoalRouterWindowsPath ([string]$owned.install_root) 'install.sha256'))
+        TerminalFiles = $terminalFiles
+        TerminalDirectories = $terminalDirectories
         InstallerPath = [string]$owned.installer
         UninstallerPath = [string]$owned.uninstaller
         PathResult = $pathResult
@@ -247,6 +365,7 @@ function Invoke-GoalRouterUninstallCommit {
     $replacePort = $Ports.Replace
     $removeFilePort = $Ports.RemoveFile
     $removeTreePort = $Ports.RemoveTree
+    $removeDirectoryPort = $Ports.RemoveDirectory
     $setPathPort = $Ports.SetUserPath
     $writeJournal = {
         param([string]$Phase)
@@ -264,9 +383,11 @@ function Invoke-GoalRouterUninstallCommit {
     & $writeJournal -Phase 'final'
     & $writeJournal -Phase 'cleanup'
     foreach ($path in $Plan.FinalFiles) { & $removeFilePort -Path ([string]$path) }
+    foreach ($path in $Plan.TerminalFiles) { & $removeFilePort -Path ([string]$path) }
     & $removeFilePort -Path ([string]$Plan.RecoveryPath)
     & $removeFilePort -Path ([string]$Plan.InstallerPath)
     & $removeFilePort -Path ([string]$Plan.UninstallerPath)
+    foreach ($path in $Plan.TerminalDirectories) { & $removeDirectoryPort -Path ([string]$path) }
 }
 
 function Invoke-GoalRouterWindowsUninstall {
@@ -320,13 +441,43 @@ function Invoke-GoalRouterWindowsUninstall {
         $manifestSnapshot = & $snapshotPort -Path $manifestPath
         if (-not $manifestSnapshot.Present) {
             if ((& $snapshotPort -Path (Join-GoalRouterWindowsPath $installRootValue 'install.sha256')).Present) { throw 'trusted install control is incomplete before bounded self cleanup' }
-            $expectedPhysicalUninstaller = Join-GoalRouterWindowsPath (Join-GoalRouterWindowsPath $installRootValue 'bin') 'uninstall.ps1'
+            $boundedBinPath = Join-GoalRouterWindowsPath $installRootValue 'bin'
+            $boundedInstallerPath = Join-GoalRouterWindowsPath $boundedBinPath 'install.ps1'
+            $boundedSentinelPath = Join-GoalRouterWindowsPath $installRootValue $script:GoalRouterDirectorySentinel
+            $boundedStatePath = Join-GoalRouterWindowsPath $installRootValue 'state'
+            $boundedStateSentinelPath = Join-GoalRouterWindowsPath $boundedStatePath $script:GoalRouterDirectorySentinel
+            $expectedPhysicalUninstaller = Join-GoalRouterWindowsPath $boundedBinPath 'uninstall.ps1'
             if (-not (Test-GoalRouterWindowsPathEquivalent -First $PhysicalUninstallerPath -Second $expectedPhysicalUninstaller)) { throw 'trusted install control is missing' }
-            foreach ($residual in @('goalrouter.ps1', 'goalrouter.cmd')) {
-                if ((& $snapshotPort -Path (Join-GoalRouterWindowsPath (Join-GoalRouterWindowsPath $installRootValue 'bin') $residual)).Present) { throw 'trusted install control is missing before bounded self cleanup' }
+            Assert-GoalRouterUninstallDirectoryTarget -Info $installRootInfo -ExpectedPath $installRootValue -AllowedEntries @('bin', 'state', $script:GoalRouterDirectorySentinel) -AllowMissing $false
+            $boundedRetainsState = @($installRootInfo.Entries) -ccontains 'state'
+            $boundedSentinelPresent = @($installRootInfo.Entries) -ccontains $script:GoalRouterDirectorySentinel
+            if ($boundedSentinelPresent -and [string]$installRootInfo.Sentinel -cne $script:GoalRouterDirectorySentinelValue) { throw 'bounded install root ownership sentinel is invalid' }
+            if ($boundedRetainsState -and -not $boundedSentinelPresent) { throw 'bounded nested state lacks the install root ownership sentinel' }
+            $boundedBinInfo = & $getPathInfoPort -Path $boundedBinPath
+            Assert-GoalRouterUninstallDirectoryTarget -Info $boundedBinInfo -ExpectedPath $boundedBinPath -AllowedEntries @('install.ps1', 'uninstall.ps1') -AllowMissing $false
+            if ($boundedRetainsState) {
+                $boundedStateInfo = & $getPathInfoPort -Path $boundedStatePath
+                Assert-GoalRouterUninstallDirectoryTarget -Info $boundedStateInfo -ExpectedPath $boundedStatePath -AllowedEntries @($script:GoalRouterDirectorySentinel, 'install.json', 'install.sha256', 'runs', 'reports') -AllowMissing $false
+                if ([string]$boundedStateInfo.Sentinel -cne $script:GoalRouterDirectorySentinelValue) { throw 'bounded state ownership sentinel is invalid' }
             }
-            & $Ports.RemoveFile -Path (Join-GoalRouterWindowsPath (Join-GoalRouterWindowsPath $installRootValue 'bin') 'install.ps1')
+            foreach ($boundedDirectory in @($boundedBinPath, $installRootValue) + $(if ($boundedRetainsState) { @($boundedStatePath) } else { @() })) {
+                $trustedBoundedDirectory = & $resolvePathPort -Path $boundedDirectory -Kind 'Directory' -AllowMissing $false
+                if ($trustedBoundedDirectory.PSObject.Properties.Name -notcontains 'AncestorChainIsSafe' -or -not [bool]$trustedBoundedDirectory.AncestorChainIsSafe) { throw 'bounded uninstall directory ancestor chain is unsafe' }
+                Assert-GoalRouterLifecyclePathInfo -Info $trustedBoundedDirectory -Label 'bounded uninstall directory target' -AllowMissing $false -ProtectedRoots $protectedRoots -RequiredKind 'Directory'
+            }
+            foreach ($boundedFile in @($boundedInstallerPath, $PhysicalUninstallerPath, $boundedSentinelPath) + $(if ($boundedRetainsState) { @($boundedStateSentinelPath) } else { @() })) {
+                $boundedFileInfo = & $getPathInfoPort -Path $boundedFile
+                $boundedFileMayBeMissing = if ((Test-GoalRouterWindowsPathEquivalent -First $boundedFile -Second $PhysicalUninstallerPath) -or (Test-GoalRouterWindowsPathEquivalent -First $boundedFile -Second $boundedStateSentinelPath)) { $false } elseif (Test-GoalRouterWindowsPathEquivalent -First $boundedFile -Second $boundedSentinelPath) { -not $boundedRetainsState } else { $true }
+                Assert-GoalRouterUninstallFileTarget -Info $boundedFileInfo -ExpectedPath $boundedFile -AllowMissing $boundedFileMayBeMissing
+                $trustedBoundedFile = & $resolvePathPort -Path $boundedFile -Kind 'File' -AllowMissing $boundedFileMayBeMissing
+                if ($trustedBoundedFile.PSObject.Properties.Name -notcontains 'AncestorChainIsSafe' -or -not [bool]$trustedBoundedFile.AncestorChainIsSafe) { throw 'bounded uninstall file ancestor chain is unsafe' }
+                Assert-GoalRouterLifecyclePathInfo -Info $trustedBoundedFile -Label 'bounded uninstall file target' -AllowMissing $boundedFileMayBeMissing -ProtectedRoots $protectedRoots -RequiredKind 'File'
+            }
+            & $Ports.RemoveFile -Path $boundedInstallerPath
+            if (-not $boundedRetainsState) { & $Ports.RemoveFile -Path $boundedSentinelPath }
             & $Ports.RemoveFile -Path $PhysicalUninstallerPath
+            & $Ports.RemoveDirectory -Path $boundedBinPath
+            if (-not $boundedRetainsState) { & $Ports.RemoveDirectory -Path $installRootValue }
             [Console]::Out.WriteLine('GoalRouter final uninstaller cleanup completed')
             return
         }
@@ -338,7 +489,9 @@ function Invoke-GoalRouterWindowsUninstall {
     }
     $rootSentinelPresent = @($installRootInfo.Entries) -ccontains $script:GoalRouterDirectorySentinel
     if ($rootSentinelPresent -and [string]$installRootInfo.Sentinel -cne $script:GoalRouterDirectorySentinelValue) { throw 'trusted install root ownership sentinel is invalid' }
-    $rootSentinelMayBeRemoved = $recoveryMode -ceq 'purge' -and $recoveryPhase -ceq 'cleanup'
+    $recoveryNestedStatePath = if ($null -ne $manifest -and $null -ne $manifest.owned) { Join-GoalRouterWindowsPath ([string]$manifest.owned.install_root) 'state' } else { $null }
+    $recoveryPreservesNestedState = $recoveryMode -ceq 'preserve' -and -not [string]::IsNullOrEmpty($recoveryNestedStatePath) -and (Test-GoalRouterWindowsPathEquivalent -First ([string]$manifest.owned.state_dir) -Second $recoveryNestedStatePath)
+    $rootSentinelMayBeRemoved = $recoveryPhase -ceq 'cleanup' -and ($recoveryMode -ceq 'purge' -or -not $recoveryPreservesNestedState)
     if (-not $rootSentinelPresent -and -not $rootSentinelMayBeRemoved) { throw 'trusted install root ownership sentinel is missing' }
     if ([int]$manifest.manifest_version -ne 1 -or [int]$manifest.protocol_version -ne 1) { throw 'trusted install control version is invalid' }
     Assert-GoalRouterUninstallManifestLayout -Manifest $manifest
@@ -346,6 +499,12 @@ function Invoke-GoalRouterWindowsUninstall {
     Assert-GoalRouterExistingInstallManifest -Manifest $manifest -Json $trustedJson -Layout $semanticLayout
     if (-not (Test-GoalRouterWindowsPathEquivalent -First ([string]$manifest.owned.install_root) -Second $installRootValue)) { throw 'trusted install root does not match the requested root' }
     if (-not (Test-GoalRouterWindowsPathEquivalent -First ([string]$manifest.owned.uninstaller) -Second $PhysicalUninstallerPath)) { throw 'physical uninstaller path does not match trusted install control' }
+    $nestedStatePath = Join-GoalRouterWindowsPath ([string]$manifest.owned.install_root) 'state'
+    $usesNestedState = Test-GoalRouterWindowsPathEquivalent -First ([string]$manifest.owned.state_dir) -Second $nestedStatePath
+    $rootAllowedEntries = @('bin', 'install.json', 'install.sha256', $script:GoalRouterRecoveryName, $script:GoalRouterDirectorySentinel) + $(if ($usesNestedState) { @('state') } else { @() })
+    Assert-GoalRouterUninstallDirectoryTarget -Info $installRootInfo -ExpectedPath ([string]$manifest.owned.install_root) -AllowedEntries $rootAllowedEntries -AllowMissing $false
+    $binInfo = & $getPathInfoPort -Path ([string]$manifest.owned.bin_dir)
+    Assert-GoalRouterUninstallDirectoryTarget -Info $binInfo -ExpectedPath ([string]$manifest.owned.bin_dir) -AllowedEntries @('goalrouter.ps1', 'goalrouter.cmd', 'install.ps1', 'uninstall.ps1') -AllowMissing $false
     if ($SelectedPurge) {
         foreach ($purgePath in @([string]$manifest.owned.config_dir, [string]$manifest.owned.state_dir)) {
             [void](Assert-SafeGoalRouterRemoval -Path $purgePath -UserRoot $hostInfo.UserProfile -AppData $hostInfo.AppData -LocalAppData $hostInfo.LocalAppData)
@@ -365,12 +524,12 @@ function Invoke-GoalRouterWindowsUninstall {
     }
     $currentUserPath = & $getPathPort
     $plan = New-GoalRouterUninstallPlan -Manifest $manifest -Purge $SelectedPurge -PathInfos $pathInfos -CurrentUserPath $currentUserPath -RecoveryMode $recoveryMode
-    foreach ($ownedFile in @($plan.EarlyFiles) + @($plan.FinalFiles) + @($plan.RecoveryPath, $plan.InstallerPath, $plan.UninstallerPath)) {
+    foreach ($ownedFile in @($plan.EarlyFiles) + @($plan.FinalFiles) + @($plan.TerminalFiles) + @($plan.RecoveryPath, $plan.InstallerPath, $plan.UninstallerPath)) {
         $ownedFileInfo = & $getPathInfoPort -Path ([string]$ownedFile)
         $allowMissingOwnedFile = if (Test-GoalRouterWindowsPathEquivalent -First ([string]$ownedFile) -Second ([string]$plan.RecoveryPath)) { -not $recoverySnapshot.Present } else { $recoverySnapshot.Present }
         Assert-GoalRouterUninstallFileTarget -Info $ownedFileInfo -ExpectedPath ([string]$ownedFile) -AllowMissing $allowMissingOwnedFile
     }
-    foreach ($ownedFile in @($plan.EarlyFiles) + @($plan.FinalFiles) + @($plan.RecoveryPath, $plan.InstallerPath, $plan.UninstallerPath)) {
+    foreach ($ownedFile in @($plan.EarlyFiles) + @($plan.FinalFiles) + @($plan.TerminalFiles) + @($plan.RecoveryPath, $plan.InstallerPath, $plan.UninstallerPath)) {
         $allowMissingOwnedFile = if (Test-GoalRouterWindowsPathEquivalent -First ([string]$ownedFile) -Second ([string]$plan.RecoveryPath)) { -not $recoverySnapshot.Present } else { $recoverySnapshot.Present }
         $trustedFileInfo = & $resolvePathPort -Path ([string]$ownedFile) -Kind 'File' -AllowMissing $allowMissingOwnedFile
         if ($trustedFileInfo.PSObject.Properties.Name -notcontains 'AncestorChainIsSafe' -or -not [bool]$trustedFileInfo.AncestorChainIsSafe) { throw 'uninstall file deletion target ancestor chain is unsafe' }
@@ -380,6 +539,11 @@ function Invoke-GoalRouterWindowsUninstall {
         $trustedTreeInfo = & $resolvePathPort -Path ([string]$ownedTree) -Kind 'Directory' -AllowMissing $false
         if ($trustedTreeInfo.PSObject.Properties.Name -notcontains 'AncestorChainIsSafe' -or -not [bool]$trustedTreeInfo.AncestorChainIsSafe) { throw 'uninstall tree deletion target ancestor chain is unsafe' }
         Assert-GoalRouterLifecyclePathInfo -Info $trustedTreeInfo -Label 'uninstall tree deletion target' -AllowMissing $false -ProtectedRoots $protectedRoots -RequiredKind 'Directory'
+    }
+    foreach ($terminalDirectory in @($plan.TerminalDirectories)) {
+        $trustedTerminalInfo = & $resolvePathPort -Path ([string]$terminalDirectory) -Kind 'Directory' -AllowMissing $false
+        if ($trustedTerminalInfo.PSObject.Properties.Name -notcontains 'AncestorChainIsSafe' -or -not [bool]$trustedTerminalInfo.AncestorChainIsSafe) { throw 'uninstall terminal directory ancestor chain is unsafe' }
+        Assert-GoalRouterLifecyclePathInfo -Info $trustedTerminalInfo -Label 'uninstall terminal directory target' -AllowMissing $false -ProtectedRoots $protectedRoots -RequiredKind 'Directory'
     }
     Invoke-GoalRouterUninstallCommit -Plan $plan -Ports $Ports
     [Console]::Out.WriteLine("GoalRouter uninstalled in $($plan.Mode) mode")

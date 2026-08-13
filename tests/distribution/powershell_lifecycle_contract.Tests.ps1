@@ -488,7 +488,26 @@ function New-MemoryLifecyclePorts {
         if ($State.ThrowPhase -ceq "remove:$Path") { throw "injected removal failure: $Path" }
         [void]$State.Files.Remove($Path)
     }.GetNewClosure()
-    return [pscustomobject]@{ Snapshot = $snapshot; Replace = $replace; Restore = $restore; GetUserPath = $getPath; SetUserPath = $setPath; Doctor = $doctor; RemoveFile = $remove; RemoveTree = $remove }
+    $removeTree = {
+        param([string]$Path)
+        [void]$State.Calls.Add("remove-tree:$Path")
+        if ($State.ThrowPhase -ceq "remove-tree:$Path") { throw "injected tree removal failure: $Path" }
+        foreach ($filePath in @($State.Files.Keys)) {
+            if ($filePath -ieq $Path -or $filePath.StartsWith($Path.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) { [void]$State.Files.Remove($filePath) }
+        }
+        foreach ($directoryPath in @($State.Directories)) {
+            if ($directoryPath -ieq $Path -or $directoryPath.StartsWith($Path.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) { [void]$State.Directories.Remove($directoryPath) }
+        }
+    }.GetNewClosure()
+    $removeDirectory = {
+        param([string]$Path)
+        [void]$State.Calls.Add("remove-directory:$Path")
+        if ($State.ThrowPhase -ceq "remove-directory:$Path") { throw "injected directory removal failure: $Path" }
+        $prefix = $Path.TrimEnd('\') + '\'
+        if (@($State.Files.Keys | Where-Object { $_.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase) }).Count -gt 0 -or @($State.Directories | Where-Object { $_.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase) }).Count -gt 0) { throw "directory is not empty: $Path" }
+        [void]$State.Directories.Remove($Path)
+    }.GetNewClosure()
+    return [pscustomobject]@{ Snapshot = $snapshot; Replace = $replace; Restore = $restore; GetUserPath = $getPath; SetUserPath = $setPath; Doctor = $doctor; RemoveFile = $remove; RemoveTree = $removeTree; RemoveDirectory = $removeDirectory }
 }
 
 Invoke-Contract 'atomic install commit rolls back files and exact User PATH after doctor failure' {
@@ -575,7 +594,7 @@ function New-SafePathInfo {
 }
 
 Invoke-Contract 'uninstall plan preserves by default and purge prevalidates every exact target' {
-    $layout = Get-GoalRouterWindowsLayout -LocalAppData 'C:\Users\Me\AppData\Local' -AppData 'C:\Users\Me\AppData\Roaming' -UserProfile 'C:\Users\Me'
+    $layout = Get-GoalRouterWindowsLayout -LocalAppData 'C:\Users\Me\AppData\Local' -AppData 'C:\Users\Me\AppData\Roaming' -UserProfile 'C:\Users\Me' -StateDir 'D:\State'
     $ownership = [pscustomobject]@{ InstallerAdded = $true; OwnedValue = $layout.BinDir; Before = [pscustomobject]@{ Present = $true; Value = 'C:\Tools' }; After = [pscustomobject]@{ Present = $true; Value = 'C:\Tools;' + $layout.BinDir } }
     $manifest = New-GoalRouterInstallManifest -Version '1.0.0' -ImageReference 'ghcr.io/vparla/goalrouter' -ImageDigest ('sha256:' + ('a' * 64)) -ImagePlatform 'linux/amd64' -SourceRevision '0123456789abcdef' -WslDistribution 'Ubuntu' -Layout $layout -PathOwnership $ownership -ReleaseBase 'https://example.com/release'
     $pathInfos = @{
@@ -587,8 +606,12 @@ Invoke-Contract 'uninstall plan preserves by default and purge prevalidates ever
     Assert-True ($layout.StateDir -cnotin $preserve.RemoveTrees) 'default preserves state'
     Assert-True ($layout.InstallerPath -cnotin $preserve.EarlyFiles) 'shared lifecycle helper retained through recovery phases'
     Assert-Equal $preserve.InstallerPath $layout.InstallerPath 'helper has explicit final cleanup target'
+    Assert-Equal $preserve.TerminalFiles @((Join-GoalRouterWindowsPath $layout.InstallRoot $script:GoalRouterDirectorySentinel)) 'external-state preserve removes exact root sentinel'
+    Assert-Equal $preserve.TerminalDirectories @($layout.BinDir, $layout.InstallRoot) 'external-state preserve removes bin before root'
     $purge = New-GoalRouterUninstallPlan -Manifest $manifest -Purge $true -PathInfos $pathInfos -CurrentUserPath $ownership.After -RecoveryMode 'purge'
     Assert-Equal $purge.RemoveTrees @($layout.ConfigDir, $layout.StateDir) 'purge exact roots'
+    Assert-Equal $purge.TerminalFiles @((Join-GoalRouterWindowsPath $layout.InstallRoot $script:GoalRouterDirectorySentinel)) 'purge removes exact root sentinel'
+    Assert-Equal $purge.TerminalDirectories @($layout.BinDir, $layout.InstallRoot) 'purge removes bin before root'
     Assert-Equal $purge.PathResult.Snapshot.Value 'C:\Tools' 'owned PATH removal planned'
     Assert-Throws { New-GoalRouterUninstallPlan -Manifest $manifest -Purge $false -PathInfos $pathInfos -CurrentUserPath $ownership.After -RecoveryMode 'purge' } 'recovery mode' 'same-mode recovery'
 
@@ -606,6 +629,14 @@ Invoke-Contract 'uninstall plan preserves by default and purge prevalidates ever
     $preserveProvider = New-SafePathInfo -Path $layout.StateDir
     $preserveProvider.ProviderPath = 'D:\Redirected\State'
     Assert-Throws { New-GoalRouterUninstallPlan -Manifest $manifest -Purge $false -PathInfos @{ Config = $pathInfos.Config; State = $preserveProvider } -CurrentUserPath $ownership.After -RecoveryMode $null } 'provider|unsafe' 'preserve refuses redirected state'
+
+    $defaultLayout = Get-GoalRouterWindowsLayout -LocalAppData 'C:\Users\Me\AppData\Local' -AppData 'C:\Users\Me\AppData\Roaming' -UserProfile 'C:\Users\Me'
+    $defaultOwnership = [pscustomobject]@{ InstallerAdded = $true; OwnedValue = $defaultLayout.BinDir; Before = [pscustomobject]@{ Present = $true; Value = 'C:\Tools' }; After = [pscustomobject]@{ Present = $true; Value = 'C:\Tools;' + $defaultLayout.BinDir } }
+    $defaultManifest = New-GoalRouterInstallManifest -Version '1.0.0' -ImageReference 'ghcr.io/vparla/goalrouter' -ImageDigest ('sha256:' + ('a' * 64)) -ImagePlatform 'linux/amd64' -SourceRevision '0123456789abcdef' -WslDistribution 'Ubuntu' -Layout $defaultLayout -PathOwnership $defaultOwnership -ReleaseBase 'https://example.com/release'
+    $defaultInfos = @{ Config = New-SafePathInfo -Path $defaultLayout.ConfigDir -Entries @($script:GoalRouterDirectorySentinel, 'task-models.yaml'); State = New-SafePathInfo -Path $defaultLayout.StateDir -Entries @($script:GoalRouterDirectorySentinel, 'install.json') }
+    $defaultPreserve = New-GoalRouterUninstallPlan -Manifest $defaultManifest -Purge $false -PathInfos $defaultInfos -CurrentUserPath $defaultOwnership.After -RecoveryMode $null
+    Assert-Equal $defaultPreserve.TerminalFiles @() 'nested-state preserve retains root sentinel'
+    Assert-Equal $defaultPreserve.TerminalDirectories @($defaultLayout.BinDir) 'nested-state preserve removes only bin terminal directory'
 }
 
 Invoke-Contract 'uninstall validates canonical lifecycle relationships and typed file targets' {
@@ -667,7 +698,8 @@ Invoke-Contract 'installed control canonicalization rejects reordered checksumme
 
 Invoke-Contract 'uninstall commit retains recovery authority on failure and retry completes same scope' {
     $state = New-MemoryLifecycleState
-    foreach ($path in @('C:\GoalRouter\bin\goalrouter.ps1', 'C:\GoalRouter\bin\goalrouter.cmd', 'C:\GoalRouter\bin\install.ps1', 'C:\GoalRouter\bin\uninstall.ps1', 'C:\GoalRouter\install.json')) { $state.Files[$path] = 'owned' }
+    foreach ($directory in @('C:\GoalRouter', 'C:\GoalRouter\bin')) { [void]$state.Directories.Add($directory) }
+    foreach ($path in @('C:\GoalRouter\bin\goalrouter.ps1', 'C:\GoalRouter\bin\goalrouter.cmd', 'C:\GoalRouter\bin\install.ps1', 'C:\GoalRouter\bin\uninstall.ps1', 'C:\GoalRouter\install.json', 'C:\GoalRouter\.goalrouter-owned-v1')) { $state.Files[$path] = 'owned' }
     $state.ThrowPhase = 'remove:C:\GoalRouter\bin\goalrouter.cmd'
     $ports = New-MemoryLifecyclePorts -State $state
     $plan = [pscustomobject]@{
@@ -677,6 +709,8 @@ Invoke-Contract 'uninstall commit retains recovery authority on failure and retr
         EarlyFiles = @('C:\GoalRouter\bin\goalrouter.ps1', 'C:\GoalRouter\bin\goalrouter.cmd')
         RemoveTrees = @()
         FinalFiles = @('C:\GoalRouter\install.json')
+        TerminalFiles = @('C:\GoalRouter\.goalrouter-owned-v1')
+        TerminalDirectories = @('C:\GoalRouter\bin', 'C:\GoalRouter')
         InstallerPath = 'C:\GoalRouter\bin\install.ps1'
         UninstallerPath = 'C:\GoalRouter\bin\uninstall.ps1'
         PathResult = [pscustomobject]@{ Changed = $false; Snapshot = $state.UserPath }
@@ -687,13 +721,16 @@ Invoke-Contract 'uninstall commit retains recovery authority on failure and retr
     Assert-True $state.Files.ContainsKey('C:\GoalRouter\uninstall-recovery.json') 'recovery mode retained'
     $state.ThrowPhase = $null
     Invoke-GoalRouterUninstallCommit -Plan $plan -Ports $ports
-    foreach ($path in @('C:\GoalRouter\bin\goalrouter.ps1', 'C:\GoalRouter\bin\goalrouter.cmd', 'C:\GoalRouter\bin\install.ps1', 'C:\GoalRouter\bin\uninstall.ps1', 'C:\GoalRouter\install.json', 'C:\GoalRouter\uninstall-recovery.json')) { Assert-True (-not $state.Files.ContainsKey($path)) "removed $path" }
+    foreach ($path in @('C:\GoalRouter\bin\goalrouter.ps1', 'C:\GoalRouter\bin\goalrouter.cmd', 'C:\GoalRouter\bin\install.ps1', 'C:\GoalRouter\bin\uninstall.ps1', 'C:\GoalRouter\install.json', 'C:\GoalRouter\.goalrouter-owned-v1', 'C:\GoalRouter\uninstall-recovery.json')) { Assert-True (-not $state.Files.ContainsKey($path)) "removed $path" }
+    Assert-True (-not $state.Directories.Contains('C:\GoalRouter\bin')) 'bin terminal directory removed'
+    Assert-True (-not $state.Directories.Contains('C:\GoalRouter')) 'install-root terminal directory removed'
 }
 
 Invoke-Contract 'phase journal keeps every late uninstall phase retryable and attempts completed targets idempotently' {
-    foreach ($failurePhase in @('set-user-path', 'remove:D:\State', 'remove:C:\GoalRouter\install.json', 'remove:C:\GoalRouter\bin\install.ps1', 'remove:C:\GoalRouter\bin\uninstall.ps1')) {
+    foreach ($failurePhase in @('set-user-path', 'remove-tree:D:\State', 'remove:C:\GoalRouter\install.json', 'remove:C:\GoalRouter\bin\install.ps1', 'remove:C:\GoalRouter\bin\uninstall.ps1', 'remove-directory:C:\GoalRouter\bin', 'remove-directory:C:\GoalRouter')) {
         $state = New-MemoryLifecycleState
-        foreach ($path in @('C:\GoalRouter\bin\goalrouter.ps1', 'C:\GoalRouter\bin\goalrouter.cmd', 'C:\GoalRouter\bin\install.ps1', 'C:\GoalRouter\bin\uninstall.ps1', 'C:\GoalRouter\install.json', 'C:\GoalRouter\install.sha256', 'D:\State')) { $state.Files[$path] = 'owned' }
+        foreach ($directory in @('C:\GoalRouter', 'C:\GoalRouter\bin', 'D:\State')) { [void]$state.Directories.Add($directory) }
+        foreach ($path in @('C:\GoalRouter\bin\goalrouter.ps1', 'C:\GoalRouter\bin\goalrouter.cmd', 'C:\GoalRouter\bin\install.ps1', 'C:\GoalRouter\bin\uninstall.ps1', 'C:\GoalRouter\install.json', 'C:\GoalRouter\install.sha256', 'C:\GoalRouter\.goalrouter-owned-v1', 'D:\State\owned')) { $state.Files[$path] = 'owned' }
         $state.ThrowPhase = $failurePhase
         $ports = New-MemoryLifecyclePorts -State $state
         $manifest = [ordered]@{ owned = [ordered]@{ install_root = 'C:\GoalRouter' } }
@@ -701,15 +738,16 @@ Invoke-Contract 'phase journal keeps every late uninstall phase retryable and at
             Mode = 'purge'; Manifest = $manifest
             RecoveryPath = 'C:\GoalRouter\uninstall-recovery.json'
             EarlyFiles = @('C:\GoalRouter\bin\goalrouter.ps1', 'C:\GoalRouter\bin\goalrouter.cmd')
-            RemoveTrees = @('D:\State'); FinalFiles = @('C:\GoalRouter\install.json', 'C:\GoalRouter\install.sha256'); InstallerPath = 'C:\GoalRouter\bin\install.ps1'; UninstallerPath = 'C:\GoalRouter\bin\uninstall.ps1'
+            RemoveTrees = @('D:\State'); FinalFiles = @('C:\GoalRouter\install.json', 'C:\GoalRouter\install.sha256'); TerminalFiles = @('C:\GoalRouter\.goalrouter-owned-v1'); TerminalDirectories = @('C:\GoalRouter\bin', 'C:\GoalRouter'); InstallerPath = 'C:\GoalRouter\bin\install.ps1'; UninstallerPath = 'C:\GoalRouter\bin\uninstall.ps1'
             PathResult = [pscustomobject]@{ Changed = $true; Snapshot = [pscustomobject]@{ Present = $false; Value = $null } }
         }
         Assert-Throws { Invoke-GoalRouterUninstallCommit -Plan $plan -Ports $ports } 'injected' "late failure $failurePhase"
-        if ($failurePhase -cnotin @('remove:C:\GoalRouter\bin\install.ps1', 'remove:C:\GoalRouter\bin\uninstall.ps1')) { Assert-True $state.Files.ContainsKey('C:\GoalRouter\uninstall-recovery.json') "journal retained for $failurePhase" }
-        if ($failurePhase -cne 'remove:C:\GoalRouter\bin\uninstall.ps1') { Assert-True $state.Files.ContainsKey('C:\GoalRouter\bin\uninstall.ps1') "uninstaller retained for $failurePhase" }
+        if ($failurePhase -cnotin @('remove:C:\GoalRouter\bin\install.ps1', 'remove:C:\GoalRouter\bin\uninstall.ps1', 'remove-directory:C:\GoalRouter\bin', 'remove-directory:C:\GoalRouter')) { Assert-True $state.Files.ContainsKey('C:\GoalRouter\uninstall-recovery.json') "journal retained for $failurePhase" }
+        if ($failurePhase -cnotin @('remove:C:\GoalRouter\bin\uninstall.ps1', 'remove-directory:C:\GoalRouter\bin', 'remove-directory:C:\GoalRouter')) { Assert-True $state.Files.ContainsKey('C:\GoalRouter\bin\uninstall.ps1') "uninstaller retained for $failurePhase" }
         $state.ThrowPhase = $null
         Invoke-GoalRouterUninstallCommit -Plan $plan -Ports $ports
         Assert-True (-not $state.Files.ContainsKey('C:\GoalRouter\uninstall-recovery.json')) "retry finishes $failurePhase"
+        Assert-True (-not $state.Directories.Contains('C:\GoalRouter')) "retry removes terminal root after $failurePhase"
     }
 }
 
@@ -815,11 +853,25 @@ function New-FullInstallerFixture {
         if ($existed) { return @() }
         return @($Path)
     }.GetNewClosure()
-    $remove = {
+    $removeFile = {
+        param([string]$Path)
+        if ([string]$fixture.ThrowRemovePath -ceq $Path) { throw "injected removal failure: $Path" }
+        [void]$fixture.Removals.Add($Path)
+        [void]$fixture.Files.Remove($Path)
+    }.GetNewClosure()
+    $removeTree = {
         param([string]$Path)
         if ([string]$fixture.ThrowRemovePath -ceq $Path) { throw "injected removal failure: $Path" }
         [void]$fixture.Removals.Add($Path)
         foreach ($key in @($fixture.Files.Keys)) { if ($key -ieq $Path -or $key.StartsWith($Path.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) { [void]$fixture.Files.Remove($key) } }
+        foreach ($directoryPath in @($fixture.Directories)) { if ($directoryPath -ieq $Path -or $directoryPath.StartsWith($Path.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) { [void]$fixture.Directories.Remove($directoryPath) } }
+    }.GetNewClosure()
+    $removeDirectory = {
+        param([string]$Path)
+        [void]$fixture.Removals.Add($Path)
+        if ([string]$fixture.ThrowRemovePath -ceq $Path) { throw "injected removal failure: $Path" }
+        $prefix = $Path.TrimEnd('\') + '\'
+        if (@($fixture.Files.Keys | Where-Object { $_.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase) }).Count -gt 0 -or @($fixture.Directories | Where-Object { $_.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase) }).Count -gt 0) { throw "directory is not empty: $Path" }
         [void]$fixture.Directories.Remove($Path)
     }.GetNewClosure()
     $fixtureSentinelName = $script:GoalRouterDirectorySentinel
@@ -831,7 +883,7 @@ function New-FullInstallerFixture {
         $isContainer = -not $isLeaf -and ($fixture.Directories.Contains($Path) -or $entries.Count -gt 0)
         return [pscustomobject]@{ Path = $Path; ProviderName = 'FileSystem'; ProviderPath = $Path; Exists = $isLeaf -or $isContainer; IsContainer = $isContainer; IsLeaf = $isLeaf; IsReparsePoint = $false; ContainsReparsePoint = $false; OwnerMatchesCurrentUser = $true; AclIsSafe = $true; Entries = $entries; Sentinel = if ($isContainer -and $fixture.Files.ContainsKey($sentinelPath)) { [string]$fixture.Files[$sentinelPath] } else { $null } }
     }.GetNewClosure()
-    $ports = [pscustomobject]@{ GetHost = $hostInfo; ResolvePath = $resolve; ResolveLatestVersion = $resolveLatest; NewWorkDirectory = $newWork; Download = $download; ReadText = $read; WriteText = $write; GetHash = $hash; GetArchiveEntries = $entries; ExtractArchive = $extract; Native = $native; Snapshot = $snapshot; Replace = $replace; Restore = $restore; GetUserPath = $getPath; SetUserPath = $setPath; Doctor = $doctor; EnsureDirectory = $ensure; RemoveFile = $remove; RemoveTree = $remove; GetPathInfo = $pathInfo }
+    $ports = [pscustomobject]@{ GetHost = $hostInfo; ResolvePath = $resolve; ResolveLatestVersion = $resolveLatest; NewWorkDirectory = $newWork; Download = $download; ReadText = $read; WriteText = $write; GetHash = $hash; GetArchiveEntries = $entries; ExtractArchive = $extract; Native = $native; Snapshot = $snapshot; Replace = $replace; Restore = $restore; GetUserPath = $getPath; SetUserPath = $setPath; Doctor = $doctor; EnsureDirectory = $ensure; RemoveFile = $removeFile; RemoveTree = $removeTree; RemoveDirectory = $removeDirectory; GetPathInfo = $pathInfo }
     return [pscustomobject]@{ State = $fixture; Ports = $ports }
 }
 
@@ -1120,24 +1172,106 @@ Invoke-Contract 'public purge removes only exact trusted config and state trees'
     Invoke-GoalRouterWindowsUninstall -SelectedInstallRoot 'D:\Install' -SelectedPurge $true -Confirmed $true -Ports $fixture.Ports -PhysicalUninstallerPath 'D:\Install\bin\uninstall.ps1'
     Assert-True (-not (@($fixture.State.Files.Keys | Where-Object { $_.StartsWith('D:\State\', [StringComparison]::OrdinalIgnoreCase) }).Count)) 'state tree purged'
     Assert-True (-not (@($fixture.State.Files.Keys | Where-Object { $_.StartsWith('D:\Config\', [StringComparison]::OrdinalIgnoreCase) }).Count)) 'config tree purged'
+    Assert-True (-not $fixture.State.Directories.Contains('D:\Install\bin')) 'purge removes exact bin directory'
+    Assert-True (-not $fixture.State.Directories.Contains('D:\Install')) 'purge removes exact install root'
     Assert-Equal $fixture.State.Files['D:\Outside\keep.txt'] 'outside' 'outside data preserved'
 }
 
-Invoke-Contract 'preserve and purge uninstall both permit bounded fresh reinstall' {
+Invoke-Contract 'external-state preserve and purge reach exact modeled terminal state and permit fresh reinstall' {
     foreach ($purge in @($false, $true)) {
         $fixture = New-FullInstallerFixture
         $options = New-FullInstallOptions
         Invoke-GoalRouterWindowsInstall -Options $options -Ports $fixture.Ports
         $fixture.State.Files['D:\Config\task-models.yaml'] = 'user-config'
         Invoke-GoalRouterWindowsUninstall -SelectedInstallRoot 'D:\Install' -SelectedPurge $purge -Confirmed $true -Ports $fixture.Ports -PhysicalUninstallerPath 'D:\Install\bin\uninstall.ps1'
+        Assert-True (-not $fixture.State.Directories.Contains('D:\Install\bin')) "bin absent after purge=$purge"
+        Assert-True (-not $fixture.State.Directories.Contains('D:\Install')) "install root absent after purge=$purge"
+        Assert-True (-not $fixture.State.Files.ContainsKey('D:\Install\.goalrouter-owned-v1')) "install-root sentinel absent after purge=$purge"
         if (-not $purge) {
-            Assert-True $fixture.State.Files.ContainsKey('D:\Install\.goalrouter-owned-v1') 'preserve retains install-root sentinel'
             Assert-True $fixture.State.Files.ContainsKey('D:\Config\.goalrouter-owned-v1') 'preserve retains config sentinel'
             Assert-True $fixture.State.Files.ContainsKey('D:\State\.goalrouter-owned-v1') 'preserve retains state sentinel'
+            Assert-True $fixture.State.Directories.Contains('D:\Config') 'preserve retains config directory'
+            Assert-True $fixture.State.Directories.Contains('D:\State') 'preserve retains state directory'
+        } else {
+            Assert-True (-not $fixture.State.Directories.Contains('D:\Config')) 'purge removes config directory'
+            Assert-True (-not $fixture.State.Directories.Contains('D:\State')) 'purge removes state directory'
         }
         Invoke-GoalRouterWindowsInstall -Options $options -Ports $fixture.Ports
         Assert-True $fixture.State.Files.ContainsKey('D:\Install\install.json') "fresh reinstall after purge=$purge"
         if (-not $purge) { Assert-Equal $fixture.State.Files['D:\Config\task-models.yaml'] 'user-config' 'preserved config survives reinstall' }
+    }
+}
+
+Invoke-Contract 'default nested-state preserve removes bin while retaining only sentinel and state under root' {
+    $fixture = New-FullInstallerFixture
+    $options = New-FullInstallOptions
+    $options.StateDir = 'D:\Install\state'
+    Invoke-GoalRouterWindowsInstall -Options $options -Ports $fixture.Ports
+    Invoke-GoalRouterWindowsUninstall -SelectedInstallRoot 'D:\Install' -SelectedPurge $false -Confirmed $true -Ports $fixture.Ports -PhysicalUninstallerPath 'D:\Install\bin\uninstall.ps1'
+    Assert-True (-not $fixture.State.Directories.Contains('D:\Install\bin')) 'nested-state preserve removes bin'
+    Assert-True $fixture.State.Directories.Contains('D:\Install') 'nested-state preserve retains install root'
+    Assert-True $fixture.State.Directories.Contains('D:\Install\state') 'nested-state preserve retains state directory'
+    Assert-True $fixture.State.Files.ContainsKey('D:\Install\.goalrouter-owned-v1') 'nested-state preserve retains root sentinel'
+    Assert-Equal @($fixture.State.Files.Keys | Where-Object { $_.StartsWith('D:\Install\', [StringComparison]::OrdinalIgnoreCase) -and -not $_.StartsWith('D:\Install\state\', [StringComparison]::OrdinalIgnoreCase) }) @('D:\Install\.goalrouter-owned-v1') 'nested-state preserve root has only sentinel outside state'
+}
+
+Invoke-Contract 'terminal directory cleanup is child-before-parent nonrecursive and cannot report false success' {
+    $fixture = New-FullInstallerFixture
+    Invoke-GoalRouterWindowsInstall -Options (New-FullInstallOptions) -Ports $fixture.Ports
+    $fixture.State.ThrowRemovePath = 'D:\Install'
+    Assert-Throws { Invoke-GoalRouterWindowsUninstall -SelectedInstallRoot 'D:\Install' -SelectedPurge $false -Confirmed $true -Ports $fixture.Ports -PhysicalUninstallerPath 'D:\Install\bin\uninstall.ps1' } 'injected removal failure' 'terminal root deletion failure propagates'
+    $terminalCalls = @($fixture.State.Removals | Where-Object { $_ -in @('D:\Install\bin', 'D:\Install') })
+    Assert-Equal $terminalCalls @('D:\Install\bin', 'D:\Install') 'terminal directories attempted child before parent'
+    Assert-True $fixture.State.Directories.Contains('D:\Install') 'failed root deletion cannot model success'
+
+    $lateFixture = New-FullInstallerFixture
+    Invoke-GoalRouterWindowsInstall -Options (New-FullInstallOptions) -Ports $lateFixture.Ports
+    $originalRemoveFile = $lateFixture.Ports.RemoveFile
+    $lateFixture.Ports.RemoveFile = {
+        param([string]$Path)
+        & $originalRemoveFile -Path $Path
+        if ($Path -ieq 'D:\Install\bin\uninstall.ps1') { $lateFixture.State.Files['D:\Install\late.foreign'] = 'foreign' }
+    }.GetNewClosure()
+    Assert-Throws { Invoke-GoalRouterWindowsUninstall -SelectedInstallRoot 'D:\Install' -SelectedPurge $false -Confirmed $true -Ports $lateFixture.Ports -PhysicalUninstallerPath 'D:\Install\bin\uninstall.ps1' } 'not empty' 'late foreign root content fails nonrecursive removal'
+    Assert-True $lateFixture.State.Files.ContainsKey('D:\Install\late.foreign') 'late foreign content is never recursively erased'
+    Assert-True $lateFixture.State.Directories.Contains('D:\Install') 'late content retains install root'
+}
+
+Invoke-Contract 'terminal directory trust and exact entries fail before uninstall mutation' {
+    foreach ($case in @(
+        @{ Path = 'D:\Install\foreign.txt'; Content = 'foreign'; Override = $null; Pattern = 'unexpected' },
+        @{ Path = 'D:\Install\bin\foreign.txt'; Content = 'foreign'; Override = $null; Pattern = 'unexpected' },
+        @{ Path = $null; Content = $null; Override = [pscustomobject]@{ Path = 'D:\Install\bin'; ProviderName = 'FileSystem'; ProviderPath = 'D:\Install\bin'; Exists = $true; IsContainer = $true; IsLeaf = $false; IsReparsePoint = $false; ParentIsReparsePoint = $false; OwnerMatchesCurrentUser = $true; AclIsSafe = $true; AncestorChainIsSafe = $false }; Pattern = 'ancestor' }
+    )) {
+        $fixture = New-FullInstallerFixture
+        Invoke-GoalRouterWindowsInstall -Options (New-FullInstallOptions) -Ports $fixture.Ports
+        if ($null -ne $case.Path) { $fixture.State.Files[$case.Path] = $case.Content }
+        if ($null -ne $case.Override) { $fixture.State.ResolveOverrides['D:\Install\bin'] = $case.Override }
+        $fixture.State.Removals.Clear()
+        $fixture.State.Mutations.Clear()
+        $beforePath = $fixture.State.UserPath.Value
+        Assert-Throws { Invoke-GoalRouterWindowsUninstall -SelectedInstallRoot 'D:\Install' -SelectedPurge $false -Confirmed $true -Ports $fixture.Ports -PhysicalUninstallerPath 'D:\Install\bin\uninstall.ps1' } $case.Pattern 'unsafe terminal directory prevalidation'
+        Assert-Equal $fixture.State.Removals.Count 0 'unsafe terminal directory fails before deletion'
+        Assert-Equal $fixture.State.Mutations.Count 0 'unsafe terminal directory fails before journal or PATH mutation'
+        Assert-Equal $fixture.State.UserPath.Value $beforePath 'unsafe terminal directory leaves PATH unchanged'
+    }
+}
+
+Invoke-Contract 'cleanup-phase recovery retries after sentinel removal for external and nested state layouts' {
+    foreach ($nestedState in @($false, $true)) {
+        $fixture = New-FullInstallerFixture
+        $options = New-FullInstallOptions
+        if ($nestedState) { $options.StateDir = 'D:\Install\state' }
+        Invoke-GoalRouterWindowsInstall -Options $options -Ports $fixture.Ports
+        $fixture.State.ThrowRemovePath = 'D:\Install\uninstall-recovery.json'
+        Assert-Throws { Invoke-GoalRouterWindowsUninstall -SelectedInstallRoot 'D:\Install' -SelectedPurge $false -Confirmed $true -Ports $fixture.Ports -PhysicalUninstallerPath 'D:\Install\bin\uninstall.ps1' } 'injected removal failure' "cleanup recovery failure nested=$nestedState"
+        Assert-True $fixture.State.Files.ContainsKey('D:\Install\uninstall-recovery.json') "recovery marker remains nested=$nestedState"
+        if ($nestedState) { Assert-True $fixture.State.Files.ContainsKey('D:\Install\.goalrouter-owned-v1') 'nested-state recovery retains sentinel' }
+        else { Assert-True (-not $fixture.State.Files.ContainsKey('D:\Install\.goalrouter-owned-v1')) 'external-state recovery permits already removed sentinel' }
+        $fixture.State.ThrowRemovePath = $null
+        Invoke-GoalRouterWindowsUninstall -SelectedInstallRoot 'D:\Install' -SelectedPurge $false -Confirmed $false -Ports $fixture.Ports -PhysicalUninstallerPath 'D:\Install\bin\uninstall.ps1'
+        Assert-True (-not $fixture.State.Directories.Contains('D:\Install\bin')) "recovery removes bin nested=$nestedState"
+        Assert-Equal $fixture.State.Directories.Contains('D:\Install') $nestedState "recovery root state nested=$nestedState"
     }
 }
 
@@ -1289,7 +1423,7 @@ Invoke-Contract 'install destinations reject wrong kinds foreign content and pro
 }
 
 Invoke-Contract 'uninstall recovery journal carries trusted authority and permits completed purge targets' {
-    $manifest = [ordered]@{ manifest_version = 1; protocol_version = 1; owned = [ordered]@{ install_root = 'D:\Install'; config_dir = 'D:\Config'; config_file = 'D:\Config\task-models.yaml'; state_dir = 'D:\State'; launcher = 'D:\Install\bin\goalrouter.ps1'; cmd = 'D:\Install\bin\goalrouter.cmd'; installer = 'D:\Install\bin\install.ps1'; uninstaller = 'D:\Install\bin\uninstall.ps1' }; path_ownership = [ordered]@{ installer_added = $false; update_enabled = $false; owned_value = 'D:\Install\bin'; before_state = 'absent'; before_value_kind = $null; after_value_kind = $null; after_sha256 = $null } }
+    $manifest = [ordered]@{ manifest_version = 1; protocol_version = 1; owned = [ordered]@{ install_root = 'D:\Install'; bin_dir = 'D:\Install\bin'; config_dir = 'D:\Config'; config_file = 'D:\Config\task-models.yaml'; state_dir = 'D:\State'; launcher = 'D:\Install\bin\goalrouter.ps1'; cmd = 'D:\Install\bin\goalrouter.cmd'; installer = 'D:\Install\bin\install.ps1'; uninstaller = 'D:\Install\bin\uninstall.ps1' }; path_ownership = [ordered]@{ installer_added = $false; update_enabled = $false; owned_value = 'D:\Install\bin'; before_state = 'absent'; before_value_kind = $null; after_value_kind = $null; after_sha256 = $null } }
     $record = New-GoalRouterUninstallRecoveryRecord -Mode 'purge' -Phase 'trees' -Manifest $manifest
     Assert-Equal $record.mode 'purge' 'journal mode'
     Assert-Equal $record.phase 'trees' 'journal phase'
@@ -1666,7 +1800,7 @@ Invoke-Contract 'trusted staging base and current-user workdir are validated bef
     Assert-True (-not $productionStagingBlock.Contains('GetTempPath')) 'production staging port never reads TEMP'
 }
 
-Invoke-Contract 'recovery journal is one atomic checksummed record and self-removal is the last fallible action' {
+Invoke-Contract 'recovery journal is atomic and self-removal immediately precedes terminal directory cleanup' {
     $manifest = [ordered]@{ owned = [ordered]@{ install_root = 'D:\Install' } }
     $record = New-GoalRouterUninstallRecoveryRecord -Mode preserve -Phase start -Manifest $manifest
     Assert-True ($record.manifest_sha256 -cmatch '\A[0-9a-f]{64}\z') 'journal embeds manifest checksum'
@@ -1678,9 +1812,11 @@ Invoke-Contract 'recovery journal is one atomic checksummed record and self-remo
     $recoveryRemoval = $commit.LastIndexOf('Plan.RecoveryPath')
     $installerRemoval = $commit.LastIndexOf('Plan.InstallerPath')
     $selfRemoval = $commit.LastIndexOf('UninstallerPath')
+    $terminalRemoval = $commit.LastIndexOf('TerminalDirectories')
     Assert-True ($cleanupJournal -ge 0 -and $selfRemoval -gt $cleanupJournal) 'cleanup journal is durable before self-removal'
     Assert-True ($recoveryRemoval -gt $cleanupJournal -and $installerRemoval -gt $recoveryRemoval -and $selfRemoval -gt $installerRemoval) 'recovery is removed before the retained helper and physical uninstaller'
     Assert-True ($commit.Substring($selfRemoval) -notmatch 'writeJournal|replacePort') 'no fallible journal write follows self-removal'
+    Assert-True ($terminalRemoval -gt $selfRemoval) 'nonrecursive terminal directory cleanup follows physical self-removal'
     $installerSource = [IO.File]::ReadAllText($installer)
     $replaceStart = $installerSource.IndexOf('$replace = {')
     $replaceBlock = $installerSource.Substring($replaceStart, $installerSource.IndexOf('$restore = {') - $replaceStart)
@@ -1842,15 +1978,65 @@ Invoke-Contract 'public bounded final cleanup retries only canonical lifecycle r
     $fixture = New-FullInstallerFixture
     [void]$fixture.State.Directories.Add('D:\Install')
     [void]$fixture.State.Directories.Add('D:\Install\bin')
+    $fixture.State.Files['D:\Install\.goalrouter-owned-v1'] = $script:GoalRouterDirectorySentinelValue
     $fixture.State.Files['D:\Install\bin\install.ps1'] = 'residual-library'
     $fixture.State.Files['D:\Install\bin\uninstall.ps1'] = 'residual-uninstaller'
     Invoke-GoalRouterWindowsUninstall -SelectedInstallRoot 'D:\Install' -SelectedPurge $false -Confirmed $false -Ports $fixture.Ports -PhysicalUninstallerPath 'D:\Install\bin\uninstall.ps1'
     Assert-True (-not $fixture.State.Files.ContainsKey('D:\Install\bin\install.ps1')) 'residual helper cleanup completed'
     Assert-True (-not $fixture.State.Files.ContainsKey('D:\Install\bin\uninstall.ps1')) 'residual self cleanup completed'
+    Assert-True (-not $fixture.State.Directories.Contains('D:\Install\bin')) 'bounded cleanup removes canonical empty bin'
+    Assert-True (-not $fixture.State.Directories.Contains('D:\Install')) 'bounded cleanup removes canonical empty root'
+    Assert-True (-not $fixture.State.Files.ContainsKey('D:\Install\.goalrouter-owned-v1')) 'bounded cleanup removes canonical root sentinel'
+    [void]$fixture.State.Directories.Add('D:\Install')
+    [void]$fixture.State.Directories.Add('D:\Install\bin')
     $fixture.State.Files['D:\Install\bin\uninstall.ps1'] = 'residual-uninstaller'
     Assert-Throws { Invoke-GoalRouterWindowsUninstall -SelectedInstallRoot 'D:\Install' -SelectedPurge $false -Confirmed $false -Ports $fixture.Ports -PhysicalUninstallerPath 'D:\Elsewhere\uninstall.ps1' } 'trusted install control is missing' 'self cleanup cannot redirect'
     $fixture.State.Files['D:\Install\install.sha256'] = ('a' * 64) + "`n"
     Assert-Throws { Invoke-GoalRouterWindowsUninstall -SelectedInstallRoot 'D:\Install' -SelectedPurge $false -Confirmed $false -Ports $fixture.Ports -PhysicalUninstallerPath 'D:\Install\bin\uninstall.ps1' } 'incomplete' 'self cleanup refuses residual checksum authority'
+
+    $foreignFixture = New-FullInstallerFixture
+    [void]$foreignFixture.State.Directories.Add('D:\Install')
+    [void]$foreignFixture.State.Directories.Add('D:\Install\bin')
+    $foreignFixture.State.Files['D:\Install\bin\uninstall.ps1'] = 'residual-uninstaller'
+    $foreignFixture.State.Files['D:\Install\foreign.txt'] = 'foreign'
+    Assert-Throws { Invoke-GoalRouterWindowsUninstall -SelectedInstallRoot 'D:\Install' -SelectedPurge $false -Confirmed $false -Ports $foreignFixture.Ports -PhysicalUninstallerPath 'D:\Install\bin\uninstall.ps1' } 'canonical|foreign|unexpected|nonempty' 'bounded cleanup rejects foreign root content'
+    Assert-True $foreignFixture.State.Files.ContainsKey('D:\Install\foreign.txt') 'bounded cleanup preserves foreign root content'
+
+    $nestedFixture = New-FullInstallerFixture
+    $nestedOptions = New-FullInstallOptions
+    $nestedOptions.StateDir = 'D:\Install\state'
+    Invoke-GoalRouterWindowsInstall -Options $nestedOptions -Ports $nestedFixture.Ports
+    foreach ($completedPath in @('D:\Install\install.json', 'D:\Install\install.sha256', 'D:\Install\bin\goalrouter.ps1', 'D:\Install\bin\goalrouter.cmd')) { [void]$nestedFixture.State.Files.Remove($completedPath) }
+    Invoke-GoalRouterWindowsUninstall -SelectedInstallRoot 'D:\Install' -SelectedPurge $false -Confirmed $false -Ports $nestedFixture.Ports -PhysicalUninstallerPath 'D:\Install\bin\uninstall.ps1'
+    Assert-True (-not $nestedFixture.State.Directories.Contains('D:\Install\bin')) 'bounded nested-state cleanup removes bin'
+    Assert-True $nestedFixture.State.Directories.Contains('D:\Install') 'bounded nested-state cleanup retains root'
+    Assert-True $nestedFixture.State.Directories.Contains('D:\Install\state') 'bounded nested-state cleanup retains state'
+    Assert-True $nestedFixture.State.Files.ContainsKey('D:\Install\.goalrouter-owned-v1') 'bounded nested-state cleanup retains root sentinel'
+    Assert-True ('resolve:File:D:\Install\state\.goalrouter-owned-v1' -cin @($nestedFixture.State.Calls)) 'bounded nested-state sentinel is proven as a typed trusted leaf'
+}
+
+Invoke-Contract 'production terminal directory port deletes only an exact empty directory nonrecursively' {
+    $fixtureRoot = Join-Path '/tmp' ('goalrouter-remove-directory-' + [guid]::NewGuid().ToString('N'))
+    [void][IO.Directory]::CreateDirectory($fixtureRoot)
+    try {
+        $empty = Join-Path $fixtureRoot 'empty'
+        [void][IO.Directory]::CreateDirectory($empty)
+        $nonempty = Join-Path $fixtureRoot 'nonempty'
+        [void][IO.Directory]::CreateDirectory($nonempty)
+        [IO.File]::WriteAllText((Join-Path $nonempty 'foreign.txt'), 'foreign')
+        $ports = New-GoalRouterProductionLifecyclePorts
+        & $ports.RemoveDirectory -Path $empty
+        Assert-True (-not [IO.Directory]::Exists($empty)) 'production port removes empty directory'
+        Assert-Throws { & $ports.RemoveDirectory -Path $nonempty } 'not empty|directory' 'production port refuses nonempty directory'
+        Assert-True ([IO.File]::Exists((Join-Path $nonempty 'foreign.txt'))) 'production port never recursively erases late content'
+        $source = [IO.File]::ReadAllText($installer)
+        $removeDirectoryStart = $source.IndexOf('$removeEmptyDirectory = {')
+        $removeDirectoryBlock = $source.Substring($removeDirectoryStart, $source.IndexOf('$getPathInfo = {') - $removeDirectoryStart)
+        Assert-True $removeDirectoryBlock.Contains('[IO.Directory]::Delete($Path, $false)') 'production port uses exact typed nonrecursive directory deletion'
+        Assert-True (-not $removeDirectoryBlock.Contains('-Recurse')) 'production terminal directory deletion is never recursive'
+    } finally {
+        if (Test-Path -LiteralPath $fixtureRoot) { Remove-Item -LiteralPath $fixtureRoot -Recurse -Force -ErrorAction Stop }
+    }
 }
 
 Invoke-Contract 'pre-import lifecycle and bounded self cleanup require typed trusted physical leaves' {
@@ -1869,6 +2055,21 @@ Invoke-Contract 'pre-import lifecycle and bounded self cleanup require typed tru
         $inspection = $safe.PSObject.Copy(); $inspection.($change.Name) = $change.Value
         Assert-Throws { Assert-GoalRouterBootstrapLeaf -Path 'D:\Install\bin\uninstall.ps1' -ExpectedPath 'D:\Install\bin\uninstall.ps1' -Inspection $inspection } $change.Pattern "bootstrap $($change.Name)"
     }
+    $safeDirectory = [pscustomobject]@{ Count = 1; ProviderName = 'FileSystem'; ProviderPath = 'D:\Install\bin'; IsContainer = $true; IsLeaf = $false; IsReparsePoint = $false; OwnerMatchesCurrentUser = $true; AclIsSafe = $true; AncestorChainIsSafe = $true; Entries = @('uninstall.ps1') }
+    Assert-Equal (Assert-GoalRouterBootstrapDirectory -Path 'D:\Install\bin' -ExpectedPath 'D:\Install\bin' -Inspection $safeDirectory -AllowedEntries @('uninstall.ps1')) 'D:\Install\bin' 'safe bootstrap directory'
+    foreach ($change in @(
+        @{ Name = 'ProviderPath'; Value = 'D:\Redirected\bin'; Pattern = 'provider|exact' },
+        @{ Name = 'IsContainer'; Value = $false; Pattern = 'directory' },
+        @{ Name = 'IsLeaf'; Value = $true; Pattern = 'directory' },
+        @{ Name = 'IsReparsePoint'; Value = $true; Pattern = 'reparse' },
+        @{ Name = 'OwnerMatchesCurrentUser'; Value = $false; Pattern = 'owned|owner' },
+        @{ Name = 'AclIsSafe'; Value = $false; Pattern = 'ACL' },
+        @{ Name = 'AncestorChainIsSafe'; Value = $false; Pattern = 'ancestor' },
+        @{ Name = 'Entries'; Value = @('uninstall.ps1', 'foreign.txt'); Pattern = 'unexpected' }
+    )) {
+        $inspection = $safeDirectory.PSObject.Copy(); $inspection.($change.Name) = $change.Value
+        Assert-Throws { Assert-GoalRouterBootstrapDirectory -Path 'D:\Install\bin' -ExpectedPath 'D:\Install\bin' -Inspection $inspection -AllowedEntries @('uninstall.ps1') } $change.Pattern "bootstrap directory $($change.Name)"
+    }
     $source = [IO.File]::ReadAllText($uninstaller)
     $physicalProofStart = $source.IndexOf('function Assert-GoalRouterBootstrapPhysicalLeaf')
     $physicalProof = $source.Substring($physicalProofStart, $source.IndexOf('$selectedInstallRootArgument') - $physicalProofStart)
@@ -1880,6 +2081,10 @@ Invoke-Contract 'pre-import lifecycle and bounded self cleanup require typed tru
     Assert-True ($libraryProofIndex -ge 0 -and $libraryProofIndex -lt $importIndex) 'installer sibling is physically proven before dot-source import'
     $fallback = $source.Substring($source.IndexOf("if (-not (Test-Path -LiteralPath `$installerLibrary -PathType Leaf))"), $importIndex - $source.IndexOf("if (-not (Test-Path -LiteralPath `$installerLibrary -PathType Leaf))"))
     Assert-True $fallback.Contains('Assert-GoalRouterBootstrapPhysicalLeaf -Path $PSCommandPath') 'bounded self target is physically proven'
+    Assert-True $fallback.Contains('Assert-GoalRouterBootstrapPhysicalDirectory -Path $PSScriptRoot') 'bounded bin target is physically proven'
+    Assert-True $fallback.Contains('Assert-GoalRouterBootstrapPhysicalDirectory -Path $fallbackInstallRoot') 'bounded install root target is physically proven'
+    Assert-True $fallback.Contains('[IO.Directory]::Delete($resolvedBinTarget, $false)') 'bounded bin deletion is exact and nonrecursive'
+    Assert-True $fallback.Contains('[IO.Directory]::Delete($resolvedRootTarget, $false)') 'bounded root deletion is exact and nonrecursive'
     Assert-True $fallback.Contains('Remove-Item -LiteralPath $resolvedSelfTarget -ErrorAction Stop') 'bounded self target uses typed literal deletion'
     Assert-True (-not $fallback.Contains('[IO.File]::Delete')) 'bounded fallback has no untyped file deletion'
     Assert-True ($source.IndexOf('try {', $source.IndexOf('$selectedInstallRootArgument')) -lt $source.IndexOf("if (-not (Test-Path -LiteralPath `$installerLibrary")) 'pre-import bootstrap is inside terminating boundary'

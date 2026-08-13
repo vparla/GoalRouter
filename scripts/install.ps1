@@ -970,6 +970,16 @@ namespace GoalRouter {
             Remove-Item -LiteralPath $Path -Recurse -ErrorAction Stop
         }
     }
+    $removeEmptyDirectory = {
+        param([string]$Path)
+        if (Test-Path -LiteralPath $Path) {
+            $resolved = @(Resolve-Path -LiteralPath $Path -ErrorAction Stop)
+            if ($resolved.Count -ne 1 -or [string]$resolved[0].Provider.Name -cne 'FileSystem' -or -not (Test-GoalRouterWindowsPathEquivalent -First ([string]$resolved[0].ProviderPath) -Second $Path)) { throw "refusing directory removal through provider redirection: $Path" }
+            if (-not (Test-Path -LiteralPath $Path -PathType Container)) { throw "refusing non-directory terminal removal target: $Path" }
+            if (([IO.File]::GetAttributes($Path) -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "refusing directory removal through reparse point: $Path" }
+            [IO.Directory]::Delete($Path, $false)
+        }
+    }
     $getPathInfo = {
         param([string]$Path)
         $exists = Test-Path -LiteralPath $Path
@@ -990,7 +1000,7 @@ namespace GoalRouter {
         GetHost = $getHost; ResolvePath = $resolvePath; ResolveLatestVersion = $resolveLatestVersion; NewWorkDirectory = $newWorkDirectory
         Native = $native; Download = $download; ReadText = $readText; WriteText = $writeText; GetHash = $getHash
         GetArchiveEntries = $getArchiveEntries; ExtractArchive = $extractArchive
-        Snapshot = $snapshot; Replace = $replace; Restore = $restore; EnsureDirectory = $ensureDirectory; RemoveFile = $removeFile; RemoveTree = $removeTree
+        Snapshot = $snapshot; Replace = $replace; Restore = $restore; EnsureDirectory = $ensureDirectory; RemoveFile = $removeFile; RemoveTree = $removeTree; RemoveDirectory = $removeEmptyDirectory
         GetUserPath = $getUserPath; SetUserPath = $setUserPath; Doctor = $doctor; GetPathInfo = $getPathInfo
     }
 }
