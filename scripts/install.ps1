@@ -980,6 +980,41 @@ namespace GoalRouter {
             [IO.Directory]::Delete($Path, $false)
         }
     }
+    $snapshotDirectory = {
+        param([string]$Path)
+        if (Test-Path -LiteralPath $Path -PathType Container) {
+            $resolved = @(Resolve-Path -LiteralPath $Path -ErrorAction Stop)
+            if ($resolved.Count -ne 1 -or [string]$resolved[0].Provider.Name -cne 'FileSystem' -or -not (Test-GoalRouterWindowsPathEquivalent -First ([string]$resolved[0].ProviderPath) -Second $Path)) { throw "refusing directory snapshot through provider redirection: $Path" }
+            if (([IO.File]::GetAttributes($Path) -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "refusing directory snapshot through reparse point: $Path" }
+            $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
+            return [pscustomobject]@{ Present = $true; Attributes = [int][IO.File]::GetAttributes($Path); SecurityDescriptorSddl = $acl.GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::All) }
+        }
+        if (Test-Path -LiteralPath $Path) { throw "owned directory snapshot target is not a directory: $Path" }
+        return [pscustomobject]@{ Present = $false; Attributes = $null; SecurityDescriptorSddl = $null }
+    }
+    $restoreDirectory = {
+        param([string]$Path, $Snapshot)
+        if (-not $Snapshot.Present) { return }
+        if (Test-Path -LiteralPath $Path) {
+            $resolved = @(Resolve-Path -LiteralPath $Path -ErrorAction Stop)
+            if ($resolved.Count -ne 1 -or [string]$resolved[0].Provider.Name -cne 'FileSystem' -or -not (Test-GoalRouterWindowsPathEquivalent -First ([string]$resolved[0].ProviderPath) -Second $Path) -or -not (Test-Path -LiteralPath $Path -PathType Container)) { throw "refusing directory recovery through provider redirection or wrong kind: $Path" }
+            $currentAttributes = [int][IO.File]::GetAttributes($Path)
+            if (($currentAttributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "refusing directory recovery through reparse point: $Path" }
+            $currentAcl = Get-Acl -LiteralPath $Path -ErrorAction Stop
+            $currentSddl = $currentAcl.GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::All)
+            if ($currentAttributes -ne [int]$Snapshot.Attributes -or $currentSddl -cne [string]$Snapshot.SecurityDescriptorSddl) { throw "refusing directory recovery after security or attribute change: $Path" }
+            return
+        }
+        $parent = Split-Path -Parent $Path
+        $resolvedParent = @(Resolve-Path -LiteralPath $parent -ErrorAction Stop)
+        if ($resolvedParent.Count -ne 1 -or [string]$resolvedParent[0].Provider.Name -cne 'FileSystem' -or -not (Test-GoalRouterWindowsPathEquivalent -First ([string]$resolvedParent[0].ProviderPath) -Second $parent) -or -not (Test-Path -LiteralPath $parent -PathType Container)) { throw "refusing directory recovery through an unsafe parent: $Path" }
+        if (([IO.File]::GetAttributes($parent) -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "refusing directory recovery through a reparse parent: $Path" }
+        [void][IO.Directory]::CreateDirectory($Path)
+        [IO.File]::SetAttributes($Path, [IO.FileAttributes][int]$Snapshot.Attributes)
+        $security = [Security.AccessControl.DirectorySecurity]::new()
+        $security.SetSecurityDescriptorSddlForm([string]$Snapshot.SecurityDescriptorSddl, [Security.AccessControl.AccessControlSections]::All)
+        Set-Acl -LiteralPath $Path -AclObject $security -ErrorAction Stop
+    }
     $getPathInfo = {
         param([string]$Path)
         $exists = Test-Path -LiteralPath $Path
@@ -1000,7 +1035,7 @@ namespace GoalRouter {
         GetHost = $getHost; ResolvePath = $resolvePath; ResolveLatestVersion = $resolveLatestVersion; NewWorkDirectory = $newWorkDirectory
         Native = $native; Download = $download; ReadText = $readText; WriteText = $writeText; GetHash = $getHash
         GetArchiveEntries = $getArchiveEntries; ExtractArchive = $extractArchive
-        Snapshot = $snapshot; Replace = $replace; Restore = $restore; EnsureDirectory = $ensureDirectory; RemoveFile = $removeFile; RemoveTree = $removeTree; RemoveDirectory = $removeEmptyDirectory
+        Snapshot = $snapshot; SnapshotDirectory = $snapshotDirectory; Replace = $replace; Restore = $restore; RestoreDirectory = $restoreDirectory; EnsureDirectory = $ensureDirectory; RemoveFile = $removeFile; RemoveTree = $removeTree; RemoveDirectory = $removeEmptyDirectory
         GetUserPath = $getUserPath; SetUserPath = $setUserPath; Doctor = $doctor; GetPathInfo = $getPathInfo
     }
 }

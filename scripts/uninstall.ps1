@@ -157,6 +157,106 @@ function Assert-GoalRouterBootstrapPhysicalDirectory {
     return Assert-GoalRouterBootstrapDirectory -Path $Path -ExpectedPath $ExpectedPath -Inspection $inspection -AllowedEntries $AllowedEntries
 }
 
+function New-GoalRouterBootstrapFileSnapshot {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
+    return [pscustomobject]@{
+        Present = $true
+        Bytes = [Convert]::ToBase64String([IO.File]::ReadAllBytes($Path))
+        Attributes = [int][IO.File]::GetAttributes($Path)
+        SecurityDescriptorSddl = $acl.GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::All)
+    }
+}
+
+function Restore-GoalRouterBootstrapFileSnapshot {
+    param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)]$Snapshot)
+    if (Test-Path -LiteralPath $Path) { throw 'bootstrap recovery file target is unexpectedly occupied' }
+    [IO.File]::WriteAllBytes($Path, [Convert]::FromBase64String([string]$Snapshot.Bytes))
+    [IO.File]::SetAttributes($Path, [IO.FileAttributes][int]$Snapshot.Attributes)
+    $security = [Security.AccessControl.FileSecurity]::new()
+    $security.SetSecurityDescriptorSddlForm([string]$Snapshot.SecurityDescriptorSddl, [Security.AccessControl.AccessControlSections]::All)
+    Set-Acl -LiteralPath $Path -AclObject $security -ErrorAction Stop
+}
+
+function New-GoalRouterBootstrapDirectorySnapshot {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
+    return [pscustomobject]@{
+        Present = $true
+        Attributes = [int][IO.File]::GetAttributes($Path)
+        SecurityDescriptorSddl = $acl.GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::All)
+    }
+}
+
+function Restore-GoalRouterBootstrapDirectorySnapshot {
+    param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)]$Snapshot)
+    if (Test-Path -LiteralPath $Path) {
+        [void](Assert-GoalRouterBootstrapPhysicalDirectory -Path $Path -ExpectedPath $Path -AllowedEntries @(Get-ChildItem -LiteralPath $Path -Force -ErrorAction Stop | ForEach-Object { $_.Name }))
+        $currentAttributes = [int][IO.File]::GetAttributes($Path)
+        $currentAcl = Get-Acl -LiteralPath $Path -ErrorAction Stop
+        $currentSddl = $currentAcl.GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::All)
+        if ($currentAttributes -ne [int]$Snapshot.Attributes -or $currentSddl -cne [string]$Snapshot.SecurityDescriptorSddl) { throw 'bootstrap recovery directory security or attributes changed' }
+        return
+    }
+    [void][IO.Directory]::CreateDirectory($Path)
+    [IO.File]::SetAttributes($Path, [IO.FileAttributes][int]$Snapshot.Attributes)
+    $security = [Security.AccessControl.DirectorySecurity]::new()
+    $security.SetSecurityDescriptorSddlForm([string]$Snapshot.SecurityDescriptorSddl, [Security.AccessControl.AccessControlSections]::All)
+    Set-Acl -LiteralPath $Path -AclObject $security -ErrorAction Stop
+}
+
+function Invoke-GoalRouterTerminalCleanupWithRecovery {
+    param(
+        [string[]]$ControlFiles,
+        [string[]]$TerminalFiles,
+        [string[]]$TerminalDirectories,
+        [object[]]$FileRecovery,
+        [object[]]$DirectoryRecovery,
+        [Parameter(Mandatory = $true)][scriptblock]$RemoveFilePort,
+        [Parameter(Mandatory = $true)][scriptblock]$RemoveDirectoryPort,
+        [Parameter(Mandatory = $true)][scriptblock]$RestoreFilePort,
+        [Parameter(Mandatory = $true)][scriptblock]$RestoreDirectoryPort
+    )
+    $removedFiles = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    try {
+        foreach ($path in @($ControlFiles)) {
+            if ([string]::IsNullOrEmpty([string]$path)) { continue }
+            & $RemoveFilePort -Path ([string]$path)
+            [void]$removedFiles.Add([string]$path)
+        }
+        foreach ($path in @($TerminalFiles)) {
+            if ([string]::IsNullOrEmpty([string]$path)) { continue }
+            & $RemoveFilePort -Path ([string]$path)
+            [void]$removedFiles.Add([string]$path)
+        }
+        foreach ($path in @($TerminalDirectories)) {
+            if ([string]::IsNullOrEmpty([string]$path)) { continue }
+            & $RemoveDirectoryPort -Path ([string]$path)
+        }
+    } catch {
+        $failure = $_
+        $recoveryFailures = [Collections.ArrayList]::new()
+        $directoryRecoveryFailed = $false
+        foreach ($record in @($DirectoryRecovery)) {
+            try { & $RestoreDirectoryPort -Record $record }
+            catch {
+                $directoryRecoveryFailed = $true
+                [void]$recoveryFailures.Add($_.Exception.Message)
+            }
+        }
+        if (-not $directoryRecoveryFailed) {
+            foreach ($record in @($FileRecovery)) {
+                if (-not $removedFiles.Contains([string]$record.Path)) { continue }
+                try { & $RestoreFilePort -Record $record }
+                catch { [void]$recoveryFailures.Add($_.Exception.Message) }
+            }
+        }
+        $primaryException = $failure.Exception
+        if ($recoveryFailures.Count -gt 0) { $primaryException.Data['GoalRouterTerminalRecoveryFailures'] = @($recoveryFailures) -join ' | ' }
+        throw $primaryException
+    }
+}
+
 $selectedInstallRootArgument = $InstallRoot
 $selectedConfirmedArgument = [bool]$Yes
 try {
@@ -176,7 +276,8 @@ try {
         $resolvedRootTarget = Assert-GoalRouterBootstrapPhysicalDirectory -Path $fallbackInstallRoot -ExpectedPath $fallbackInstallRoot -AllowedEntries @('bin', 'state', '.goalrouter-owned-v1')
         $resolvedBinTarget = Assert-GoalRouterBootstrapPhysicalDirectory -Path $PSScriptRoot -ExpectedPath $fallbackBinPath -AllowedEntries @('uninstall.ps1')
         $resolvedSelfTarget = Assert-GoalRouterBootstrapPhysicalLeaf -Path $PSCommandPath -ExpectedPath $expectedUninstaller
-        $retainsNestedState = Test-Path -LiteralPath $fallbackStatePath -PathType Container
+        $rootEntries = @(Get-ChildItem -LiteralPath $resolvedRootTarget -Force -ErrorAction Stop | ForEach-Object { $_.Name })
+        $retainsNestedState = $rootEntries -ccontains 'state'
         $sentinelPresent = Test-Path -LiteralPath $fallbackSentinelPath
         if ($sentinelPresent) {
             $resolvedSentinelTarget = Assert-GoalRouterBootstrapPhysicalLeaf -Path $fallbackSentinelPath -ExpectedPath $fallbackSentinelPath
@@ -188,12 +289,18 @@ try {
             $stateSentinelPath = Join-Path $fallbackStatePath '.goalrouter-owned-v1'
             $resolvedStateSentinel = Assert-GoalRouterBootstrapPhysicalLeaf -Path $stateSentinelPath -ExpectedPath $stateSentinelPath
             if ([IO.File]::ReadAllText($resolvedStateSentinel, [Text.Encoding]::UTF8) -cne 'goalrouter-owned-directory-v1') { throw 'bounded state ownership sentinel is invalid' }
-        } elseif ($sentinelPresent) {
-            Remove-Item -LiteralPath $resolvedSentinelTarget -ErrorAction Stop
         }
-        Remove-Item -LiteralPath $resolvedSelfTarget -ErrorAction Stop
-        [IO.Directory]::Delete($resolvedBinTarget, $false)
-        if (-not $retainsNestedState) { [IO.Directory]::Delete($resolvedRootTarget, $false) }
+        $bootstrapFileRecovery = @([pscustomobject]@{ Path = $resolvedSelfTarget; Snapshot = New-GoalRouterBootstrapFileSnapshot -Path $resolvedSelfTarget })
+        if ($sentinelPresent -and -not $retainsNestedState) { $bootstrapFileRecovery = @([pscustomobject]@{ Path = $resolvedSentinelTarget; Snapshot = New-GoalRouterBootstrapFileSnapshot -Path $resolvedSentinelTarget }) + $bootstrapFileRecovery }
+        $bootstrapDirectoryRecovery = @(
+            [pscustomobject]@{ Path = $resolvedRootTarget; Snapshot = New-GoalRouterBootstrapDirectorySnapshot -Path $resolvedRootTarget }
+            [pscustomobject]@{ Path = $resolvedBinTarget; Snapshot = New-GoalRouterBootstrapDirectorySnapshot -Path $resolvedBinTarget }
+        )
+        $bootstrapRemoveFile = { param([string]$Path); Remove-Item -LiteralPath $Path -ErrorAction Stop }
+        $bootstrapRemoveDirectory = { param([string]$Path); [IO.Directory]::Delete($Path, $false) }
+        $bootstrapRestoreFile = { param($Record); Restore-GoalRouterBootstrapFileSnapshot -Path ([string]$Record.Path) -Snapshot $Record.Snapshot }
+        $bootstrapRestoreDirectory = { param($Record); Restore-GoalRouterBootstrapDirectorySnapshot -Path ([string]$Record.Path) -Snapshot $Record.Snapshot }
+        Invoke-GoalRouterTerminalCleanupWithRecovery -ControlFiles @($resolvedSelfTarget) -TerminalFiles $(if ($sentinelPresent -and -not $retainsNestedState) { @($resolvedSentinelTarget) } else { @() }) -TerminalDirectories (@($resolvedBinTarget) + $(if ($retainsNestedState) { @() } else { @($resolvedRootTarget) })) -FileRecovery $bootstrapFileRecovery -DirectoryRecovery $bootstrapDirectoryRecovery -RemoveFilePort $bootstrapRemoveFile -RemoveDirectoryPort $bootstrapRemoveDirectory -RestoreFilePort $bootstrapRestoreFile -RestoreDirectoryPort $bootstrapRestoreDirectory
         [Console]::Out.WriteLine('GoalRouter final uninstaller cleanup completed')
         exit 0
     }
@@ -362,10 +469,14 @@ function New-GoalRouterUninstallPlan {
 
 function Invoke-GoalRouterUninstallCommit {
     param([Parameter(Mandatory = $true)]$Plan, [Parameter(Mandatory = $true)]$Ports)
+    $snapshotPort = $Ports.Snapshot
+    $snapshotDirectoryPort = $Ports.SnapshotDirectory
     $replacePort = $Ports.Replace
     $removeFilePort = $Ports.RemoveFile
     $removeTreePort = $Ports.RemoveTree
     $removeDirectoryPort = $Ports.RemoveDirectory
+    $restorePort = $Ports.Restore
+    $restoreDirectoryPort = $Ports.RestoreDirectory
     $setPathPort = $Ports.SetUserPath
     $writeJournal = {
         param([string]$Phase)
@@ -383,11 +494,23 @@ function Invoke-GoalRouterUninstallCommit {
     & $writeJournal -Phase 'final'
     & $writeJournal -Phase 'cleanup'
     foreach ($path in $Plan.FinalFiles) { & $removeFilePort -Path ([string]$path) }
-    foreach ($path in $Plan.TerminalFiles) { & $removeFilePort -Path ([string]$path) }
-    & $removeFilePort -Path ([string]$Plan.RecoveryPath)
-    & $removeFilePort -Path ([string]$Plan.InstallerPath)
-    & $removeFilePort -Path ([string]$Plan.UninstallerPath)
-    foreach ($path in $Plan.TerminalDirectories) { & $removeDirectoryPort -Path ([string]$path) }
+    $terminalFileRecovery = @(
+        foreach ($path in @($Plan.TerminalFiles)) { [pscustomobject]@{ Path = [string]$path; Snapshot = & $snapshotPort -Path ([string]$path) } }
+        foreach ($path in @($Plan.RecoveryPath, $Plan.InstallerPath, $Plan.UninstallerPath)) { [pscustomobject]@{ Path = [string]$path; Snapshot = & $snapshotPort -Path ([string]$path) } }
+    )
+    $terminalDirectoryRecovery = @()
+    for ($index = @($Plan.TerminalDirectories).Count - 1; $index -ge 0; $index--) {
+        $path = [string]@($Plan.TerminalDirectories)[$index]
+        $terminalDirectoryRecovery += [pscustomobject]@{ Path = $path; Snapshot = & $snapshotDirectoryPort -Path $path }
+    }
+    $restoreFileRecord = {
+        param($Record)
+        $current = & $snapshotPort -Path ([string]$Record.Path)
+        if ($current.Present) { throw "terminal recovery file target is unexpectedly occupied: $($Record.Path)" }
+        if ($Record.Snapshot.Present) { & $restorePort -Path ([string]$Record.Path) -Snapshot $Record.Snapshot }
+    }.GetNewClosure()
+    $restoreDirectoryRecord = { param($Record); & $restoreDirectoryPort -Path ([string]$Record.Path) -Snapshot $Record.Snapshot }.GetNewClosure()
+    Invoke-GoalRouterTerminalCleanupWithRecovery -ControlFiles @($Plan.RecoveryPath, $Plan.InstallerPath, $Plan.UninstallerPath) -TerminalFiles @($Plan.TerminalFiles) -TerminalDirectories @($Plan.TerminalDirectories) -FileRecovery $terminalFileRecovery -DirectoryRecovery $terminalDirectoryRecovery -RemoveFilePort $removeFilePort -RemoveDirectoryPort $removeDirectoryPort -RestoreFilePort $restoreFileRecord -RestoreDirectoryPort $restoreDirectoryRecord
 }
 
 function Invoke-GoalRouterWindowsUninstall {
@@ -473,11 +596,24 @@ function Invoke-GoalRouterWindowsUninstall {
                 if ($trustedBoundedFile.PSObject.Properties.Name -notcontains 'AncestorChainIsSafe' -or -not [bool]$trustedBoundedFile.AncestorChainIsSafe) { throw 'bounded uninstall file ancestor chain is unsafe' }
                 Assert-GoalRouterLifecyclePathInfo -Info $trustedBoundedFile -Label 'bounded uninstall file target' -AllowMissing $boundedFileMayBeMissing -ProtectedRoots $protectedRoots -RequiredKind 'File'
             }
-            & $Ports.RemoveFile -Path $boundedInstallerPath
-            if (-not $boundedRetainsState) { & $Ports.RemoveFile -Path $boundedSentinelPath }
-            & $Ports.RemoveFile -Path $PhysicalUninstallerPath
-            & $Ports.RemoveDirectory -Path $boundedBinPath
-            if (-not $boundedRetainsState) { & $Ports.RemoveDirectory -Path $installRootValue }
+            $boundedFileRecovery = @(
+                if (-not $boundedRetainsState -and $boundedSentinelPresent) { [pscustomobject]@{ Path = $boundedSentinelPath; Snapshot = & $snapshotPort -Path $boundedSentinelPath } }
+                $boundedInstallerSnapshot = & $snapshotPort -Path $boundedInstallerPath
+                if ($boundedInstallerSnapshot.Present) { [pscustomobject]@{ Path = $boundedInstallerPath; Snapshot = $boundedInstallerSnapshot } }
+                [pscustomobject]@{ Path = $PhysicalUninstallerPath; Snapshot = & $snapshotPort -Path $PhysicalUninstallerPath }
+            )
+            $boundedDirectoryRecovery = @(
+                [pscustomobject]@{ Path = $installRootValue; Snapshot = & $Ports.SnapshotDirectory -Path $installRootValue }
+                [pscustomobject]@{ Path = $boundedBinPath; Snapshot = & $Ports.SnapshotDirectory -Path $boundedBinPath }
+            )
+            $boundedRestoreFile = {
+                param($Record)
+                $current = & $snapshotPort -Path ([string]$Record.Path)
+                if ($current.Present) { throw "terminal recovery file target is unexpectedly occupied: $($Record.Path)" }
+                & $Ports.Restore -Path ([string]$Record.Path) -Snapshot $Record.Snapshot
+            }.GetNewClosure()
+            $boundedRestoreDirectory = { param($Record); & $Ports.RestoreDirectory -Path ([string]$Record.Path) -Snapshot $Record.Snapshot }.GetNewClosure()
+            Invoke-GoalRouterTerminalCleanupWithRecovery -ControlFiles @($boundedInstallerPath, $PhysicalUninstallerPath) -TerminalFiles $(if (-not $boundedRetainsState -and $boundedSentinelPresent) { @($boundedSentinelPath) } else { @() }) -TerminalDirectories (@($boundedBinPath) + $(if ($boundedRetainsState) { @() } else { @($installRootValue) })) -FileRecovery $boundedFileRecovery -DirectoryRecovery $boundedDirectoryRecovery -RemoveFilePort $Ports.RemoveFile -RemoveDirectoryPort $Ports.RemoveDirectory -RestoreFilePort $boundedRestoreFile -RestoreDirectoryPort $boundedRestoreDirectory
             [Console]::Out.WriteLine('GoalRouter final uninstaller cleanup completed')
             return
         }
