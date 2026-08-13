@@ -27,8 +27,8 @@ def test_posix_installer_smoke_covers_install_update_and_uninstall_roundtrip() -
     harness = Path("scripts/posix-installer-smoke.sh").read_text(encoding="utf-8")
 
     assert '"$HOME/.local/bin/goalrouter-install"' in harness
-    assert harness.count("--version 1.0.9") >= 2
-    assert "goalrouter-1.0.9-unix.tar.gz" in harness
+    assert harness.count("--version 1.0.10") >= 2
+    assert "goalrouter-1.0.10-unix.tar.gz" in harness
     assert "configuration-before-update" in harness
     assert "state-before-update" in harness
     assert "no owned Docker resources remain" in harness

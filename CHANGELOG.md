@@ -26,6 +26,14 @@ All notable changes to GoalRouter are recorded here.
   evidence. A command-scoped exact-worktree safe-directory exception supports read-only Docker
   mounts without wildcard trust.
 
+## [1.0.10] - 2026-08-12
+
+### Fixed
+
+- Remove terminal Windows install directories after preserve and purge, retain nested
+  default-state files, expose retryable recovery through public helpers, and restore
+  preserved files atomically without collision.
+
 ## [1.0.9] - 2026-08-12
 
 ### Fixed

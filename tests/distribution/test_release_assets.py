@@ -18,9 +18,9 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 BUILDER = ROOT / "scripts" / "release-assets.sh"
-VERSION = "1.0.9"
-TAG = "v1.0.9"
-IMAGE = "ghcr.io/vparla/goalrouter:1.0.9"
+VERSION = "1.0.10"
+TAG = "v1.0.10"
+IMAGE = "ghcr.io/vparla/goalrouter:1.0.10"
 DIGEST = f"sha256:{'a' * 64}"
 REVISION = "b" * 40
 EPOCH = 1_700_000_000
@@ -33,8 +33,8 @@ MINIMUM_HOSTS = {
     "docker": "20.10",
 }
 CHECKSUM_ORDER = [
-    "goalrouter-1.0.9-unix.tar.gz",
-    "goalrouter-1.0.9-windows.zip",
+    "goalrouter-1.0.10-unix.tar.gz",
+    "goalrouter-1.0.10-windows.zip",
     "install.ps1",
     "install.sh",
     "release-manifest.json",
@@ -171,7 +171,7 @@ def test_release_manifest_is_canonical_and_raw_assets_are_exact_source_bytes(
 def test_unix_archive_has_only_safe_sorted_deterministic_regular_members(
     release_tree: Path,
 ) -> None:
-    archive = release_tree / "goalrouter-1.0.9-unix.tar.gz"
+    archive = release_tree / "goalrouter-1.0.10-unix.tar.gz"
     with archive.open("rb") as stream:
         header = stream.read(10)
     assert header[:3] == b"\x1f\x8b\x08"
@@ -207,7 +207,7 @@ def test_windows_archive_has_only_safe_sorted_deterministic_regular_members(
     release_tree: Path,
 ) -> None:
     expected_timestamp = time.gmtime(EPOCH)[:6]
-    archive = release_tree / "goalrouter-1.0.9-windows.zip"
+    archive = release_tree / "goalrouter-1.0.10-windows.zip"
     with zipfile.ZipFile(archive, mode="r") as zipped:
         members = zipped.infolist()
         assert [member.filename for member in members] == [
@@ -232,9 +232,9 @@ def test_windows_archive_has_only_safe_sorted_deterministic_regular_members(
     ("option", "invalid"),
     [
         ("--version", "1.0"),
-        ("--version", "1.0.10"),
+        ("--version", "1.0.11"),
         ("--tag", "1.0.0"),
-        ("--tag", "v1.0.10"),
+        ("--tag", "v1.0.11"),
         ("--image", "ghcr.io/vparla/goalrouter:latest"),
         ("--image", "GHCR.IO/vparla/goalrouter:1.0.0"),
         ("--image-digest", f"sha256:{'A' * 64}"),
@@ -308,7 +308,7 @@ def test_version_surface_drift_fails_before_publication(tmp_path: Path) -> None:
     builder = _copy_builder_source(staged_root)
     init_path = staged_root / "src/goalrouter/__init__.py"
     init_path.write_text(
-        init_path.read_text(encoding="utf-8").replace('"1.0.9"', '"1.0.10"'),
+        init_path.read_text(encoding="utf-8").replace('"1.0.10"', '"1.0.11"'),
         encoding="utf-8",
     )
     output = tmp_path / "release"

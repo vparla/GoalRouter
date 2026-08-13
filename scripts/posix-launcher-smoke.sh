@@ -50,7 +50,7 @@ if docker image inspect "$image" >/dev/null 2>&1; then
         || fail "existing $image has an unexpected source label"
     [ "$image_license" = MIT ] \
         || fail "existing $image has an unexpected license label"
-    [ "$image_version" = 1.0.9 ] \
+    [ "$image_version" = 1.0.10 ] \
         || fail "existing $image has an unexpected version label"
     [ -n "$expected_revision" ] \
         || fail "existing $image has no revision label"
@@ -61,7 +61,7 @@ else
         --quiet \
         --pull=false \
         --target runtime \
-        --build-arg VERSION=1.0.9 \
+        --build-arg VERSION=1.0.10 \
         --build-arg REVISION=posix-launcher-smoke \
         --build-arg CREATED=1970-01-01T00:00:00Z \
         --label "$owner_label" \
@@ -136,7 +136,7 @@ version_output=$(docker run --rm \
     --image "$image" \
     --json version)
 
-assert_contains "$version_output" '"version": "1.0.9"'
+assert_contains "$version_output" '"version": "1.0.10"'
 assert_contains "$version_output" '"protocol_version": 1'
 assert_contains "$version_output" "\"image_revision\": \"$expected_revision\""
 case $version_output in

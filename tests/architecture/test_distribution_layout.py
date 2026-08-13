@@ -181,16 +181,16 @@ SHELL_DOCKER_CLI_ANCHORS: Mapping[Path, tuple[tuple[bytes, bytes, bytes], ...]] 
 }
 DOCKER_CLI_SOURCE_SHA256: Mapping[Path, str] = {
     Path("Dockerfile"): (
-        "62618e45442b39650f81476b3f8cebae8b526e5ecf051fda2dfd913774808720"
+        "90966e79c8115e76211a2f25d696708e22b51056200fa76f4d6d084bcee367a4"
     ),
     Path("compose.yaml"): (
         "36840721cfa8113d712737b40d030cb0ac8fa04d19e98d7e1e117d489354fb35"
     ),
     Path("scripts/posix-launcher-smoke.sh"): (
-        "c6c5013b349d1e54d9ab7132f5e42203709190eb22028c3e890fb92f25b02002"
+        "f79b5065dbdfa8e25564f3efabd5dbfcba3904d0e12e9f83b730678be9a3617b"
     ),
     Path("scripts/posix-launcher-smoke-safety.sh"): (
-        "0646062e3eecafa7c324562817acb6d3f957d71edec6c844f1350f53a733c8ad"
+        "da67395ad7fbbe775575485c084882b14212dd4ae2a4754b04e010d9f82cee69"
     ),
     Path("scripts/runtime-image-smoke-interrupt.sh"): (
         "6a7aa1b483b3f87b0b299a246d3d02ea32967870fe00cbd8683cd83059115180"
@@ -202,7 +202,7 @@ DOCKER_CLI_SOURCE_SHA256: Mapping[Path, str] = {
         "6407e6ecae9f97633a531b75bd1a463461dbad28b4032582a8356c9954cbdc33"
     ),
     Path("tests/distribution/test_runtime_image.py"): (
-        "e68dda9e1972670d052622a3e54bdd48ede234f4167656abb05ff6620488e7a6"
+        "24518383ac39753ede04c12a32015db85da4ee9dee96765b7c64ec554a242278"
     ),
 }
 TEST_DOCKER_CLI_CONTEXTS: Mapping[Path, Mapping[str, Counter[bytes]]] = {

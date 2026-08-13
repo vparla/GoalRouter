@@ -32,7 +32,7 @@ goalrouter doctor
 ## Update to an exact version
 
 ```text
-goalrouter update 1.0.9
+goalrouter update 1.0.10
 goalrouter version
 goalrouter doctor
 ```

@@ -130,7 +130,7 @@ async def test_version_and_template_dispatch_without_application_composition(
     assert await cli.async_main(["--json", "version"], environ={}) == 0
     version_output = json.loads(capsys.readouterr().out)
     assert version_output == {
-        "version": "1.0.9",
+        "version": "1.0.10",
         "protocol_version": 1,
         "image_reference": None,
         "image_revision": None,
